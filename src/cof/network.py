@@ -416,8 +416,8 @@ from cof.models import RemoteRepository
 class NetworkServer:
     """UDP network server for cof repository."""
 
-    def __init__(self, root_dir: str, config: Dict[str, Any]):
-        self.root_dir = Path(root_dir).resolve()
+    def __init__(self, config: Dict[str, Any], root_dir: Optional[str] = None):
+        self.root_dir = Path(root_dir if root_dir else ".").resolve()
         self.config = config
         self.packet_size = config["network"]["packet_size"]
         self.host = "0.0.0.0"
