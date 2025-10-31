@@ -15,6 +15,12 @@ Cof is a version control system (VCS) designed and optimized for handling large 
 You can install Cof using `uv`:
 
 ```bash
+uv tool install git+https://github.com/misilelab/cof
+```
+
+or
+```bash
+# Clone repository
 uv sync
 ```
 
