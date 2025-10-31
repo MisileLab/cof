@@ -434,16 +434,28 @@ class NetworkServer:
         
         logger.info(f"Cof server started on {self.host}:{self.port}")
         
+        active_tasks = set()
         try:
             while self.running:
                 try:
                     if not self.socket:
                         raise CofProtocolError("Socket not initialized")
                     data, addr = self.socket.recvfrom(self.packet_size * 2)
-                    asyncio.create_task(self._handle_packet(data, addr))
+                    # Create task and track it
+                    task = asyncio.create_task(self._handle_packet(data, addr))
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
                 except Exception as e:
                     logger.error(f"Server error: {e}")
+            
+            # Wait for active tasks to complete before closing
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+                
         finally:
+            # Ensure all tasks are done before closing socket
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
             if self.socket:
                 self.socket.close()
 
@@ -455,13 +467,18 @@ class NetworkServer:
 
     async def _handle_packet(self, data: bytes, addr: Tuple[str, int]) -> None:
         """Handle incoming packet."""
+        # Use local socket reference
+        sock = self.socket
+        if not sock:
+            return
+            
         try:
             packet = NetworkPacket.unpack(data)
             response = await self._process_packet(packet)
             
-            if response and self.socket:
+            if response:
                 response_data = response.pack()
-                self.socket.sendto(response_data, addr)
+                sock.sendto(response_data, addr)
 
         except Exception as e:
             logger.error(f"Packet handling error: {e}")
@@ -474,8 +491,10 @@ class NetworkServer:
                 total_packets=1,
                 payload=str(e).encode()
             )
-            if self.socket:
-                self.socket.sendto(error_packet.pack(), addr)
+            try:
+                sock.sendto(error_packet.pack(), addr)
+            except Exception as send_err:
+                logger.error(f"Failed to send error response: {send_err}")
 
     async def _process_packet(self, packet: NetworkPacket) -> Optional[NetworkPacket]:
         """Process packet and return response."""
