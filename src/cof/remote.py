@@ -350,9 +350,26 @@ class RemoteOperations:
             click.echo(f"Pull failed: {e}")
             return False
 
-    async def start_server(self, config: Dict[str, Any], host: str = "0.0.0.0", port: int = 7357) -> None:
+    async def start_server(self, host: str = "0.0.0.0", port: int = 7357, config: Dict[str, Any] = None) -> None:
         """Start the cof server."""
         from cof.network import NetworkServer
+        
+        if isinstance(config, str):
+            config = {
+                "network": {
+                    "packet_size": 1400,
+                    "timeout_ms": 5000,
+                    "max_retries": 3
+                }
+            }
+        elif config is None:
+            config = {
+                "network": {
+                    "packet_size": 1400,
+                    "timeout_ms": 5000,
+                    "max_retries": 3
+                }
+            }
         
         server = NetworkServer(config)
         server.host = host

@@ -1171,17 +1171,21 @@ def server(host, port):
     """Start the Cof server."""
     import asyncio
 
-    # Try to load config from current directory, otherwise use a default
+    # Try to load config from current directory, otherwise use default
     repo = CofRepository()
-    config = repo.config if repo._is_repo() else {
+    config = None
+    if repo._is_repo():
+        config = repo.config
+
+    default_config = {
         "network": {
             "packet_size": 1400,
             "timeout_ms": 5000,
             "max_retries": 3
         }
     }
-
-    asyncio.run(repo.start_server(host, port, config))
+    actual_config = config if isinstance(config, dict) else default_config
+    asyncio.run(repo.start_server(host, port, actual_config))
 
 
 if __name__ == "__main__":
