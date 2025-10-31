@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 class NetworkServer:
     """UDP network server for cof repository."""
 
-    def __init__(self, root_dir: str, config: Dict[str, Any]):
-        self.root_dir = Path(root_dir).resolve()
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.packet_size = config["network"]["packet_size"]
         self.host = "0.0.0.0"
         self.port = 7357
         self.socket = None
         self.running = False
+        self.base_repo_dir = Path.cwd().resolve()
 
     async def start(self) -> None:
         """Start the network server."""
@@ -85,7 +85,18 @@ class NetworkServer:
     async def _process_packet(self, packet: NetworkPacket) -> Optional[NetworkPacket]:
         """Process packet and return response."""
         try:
-            repo_path = self.root_dir / packet.repo_path
+            repo_path = Path(packet.repo_path).resolve()
+
+            if not str(repo_path).startswith(str(self.base_repo_dir)):
+                return NetworkPacket(
+                    packet_type=PacketType.ERROR,
+                    session_id=packet.session_id,
+                    repo_path=packet.repo_path,
+                    sequence=0,
+                    total_packets=1,
+                    payload=f"Access denied: Repository path {packet.repo_path} is outside allowed base directory.".encode()
+                )
+
             repository = CofRepository(str(repo_path))
 
             if not repository._is_repo():

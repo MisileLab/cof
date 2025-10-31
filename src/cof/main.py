@@ -931,15 +931,12 @@ class CofRepository:
         if not success:
             raise click.ClickException("Failed to pull from remote.")
 
-    async def start_server(self, host: str, port: int) -> None:
+    async def start_server(self, host: str, port: int, config: Dict[str, Any]) -> None:
         """Start the cof server."""
         from cof.remote import RemoteOperations
 
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-
         remote_ops = RemoteOperations(self)
-        await remote_ops.start_server(host, port)
+        await remote_ops.start_server(host, port, config)
 
 
 # CLI Commands
@@ -1174,8 +1171,17 @@ def server(host, port):
     """Start the Cof server."""
     import asyncio
 
+    # Try to load config from current directory, otherwise use a default
     repo = CofRepository()
-    asyncio.run(repo.start_server(host, port))
+    config = repo.config if repo._is_repo() else {
+        "network": {
+            "packet_size": 1400,
+            "timeout_ms": 5000,
+            "max_retries": 3
+        }
+    }
+
+    asyncio.run(repo.start_server(host, port, config))
 
 
 if __name__ == "__main__":
