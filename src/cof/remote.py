@@ -115,9 +115,12 @@ class RemoteOperations:
             temp_repo = CofRepository(str(target_path))
             temp_repo.init()
             
-            # Connect to remote and fetch data
+            # Re-initialize repository to load config
+            temp_repo = CofRepository(str(target_path))
             if not temp_repo.config:
                 raise click.ClickException("Repository configuration not loaded.")
+            
+            # Connect to remote and fetch data
                 
             async with NetworkClient(temp_repo.config) as client:
                 if not await client.handshake(remote):

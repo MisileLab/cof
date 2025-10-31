@@ -180,6 +180,9 @@ class CofRepository:
 
             with open(self.cof_dir / "config.toml", "w") as f:
                 toml.dump(config, f)
+            
+            # Update instance config
+            self.config = config
 
             # Initialize HEAD
             with open(self.cof_dir / "HEAD", "w") as f:
