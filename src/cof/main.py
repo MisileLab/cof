@@ -10,9 +10,9 @@ import click
 import toml
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
-from cof.models import Commit, Tree, TreeEntry, StagedFile, BlockMap
+from cof.models import Commit, Tree, TreeEntry, StagedFile, BlockMap, RemoteRepository
 from cof.storage import BlockStorage
 from cof.auth import AuthManager, ClientAuth, Permission, generate_ssh_keypair
 from cof.remote import RemoteManager
@@ -37,7 +37,7 @@ class CofRepository:
         """Check if current directory is a cof repository."""
         return self.cof_dir.exists() and (self.cof_dir / "config.toml").exists()
 
-    def _load_config(self) -> Optional[Dict]:
+    def _load_config(self) -> Optional[Dict[str, Any]]:
         """Load repository configuration."""
         if not self._is_repo():
             return None
@@ -75,7 +75,7 @@ class CofRepository:
         
         return None
 
-    def _save_object(self, obj_data: Dict, obj_type: str) -> str:
+    def _save_object(self, obj_data: Dict[str, Any], obj_type: str) -> str:
         """Save an object and return its hash."""
         from blake3 import blake3
         
@@ -93,7 +93,7 @@ class CofRepository:
         
         return hash_hex
 
-    def _load_object(self, obj_hash: str) -> Optional[Dict]:
+    def _load_object(self, obj_hash: str) -> Optional[Dict[str, Any]]:
         """Load an object by its hash."""
         # Try hot tier first, then warm, then cold
         for tier in ["hot", "warm", "cold"]:
@@ -240,7 +240,7 @@ class CofRepository:
             self._save_staging_area(staging_area)
             click.echo(f"\nSuccessfully added {added_files} file(s) to the staging area.")
 
-    def _load_staging_area(self) -> Dict:
+    def _load_staging_area(self) -> Dict[str, Any]:
         """Load the staging area."""
         staging_path = self.cof_dir / "index" / "staging.json"
         if staging_path.exists():
@@ -254,7 +254,7 @@ class CofRepository:
                     return {}
         return {}
 
-    def _save_staging_area(self, data: Dict) -> None:
+    def _save_staging_area(self, data: Dict[str, Any]) -> None:
         """Save the staging area."""
         staging_path = self.cof_dir / "index" / "staging.json"
         staging_path.parent.mkdir(parents=True, exist_ok=True)

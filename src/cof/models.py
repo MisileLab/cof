@@ -223,3 +223,68 @@ class BlockMap:
         block_map.hash_to_commit = data.get("hash_to_commit", {})
         block_map.hash_to_refcount = data.get("hash_to_refcount", {})
         return block_map
+
+
+@dataclass
+class RemoteRepository:
+    """Remote repository configuration."""
+    name: str
+    url: str
+    host: str
+    port: int
+    repo_path: str = "/"
+    protocol: str = "udp"
+    
+    @classmethod
+    def from_url(cls, name: str, url: str) -> "RemoteRepository":
+        """Create remote from URL."""
+        if url.startswith("cof://"):
+            url = url[6:]
+        elif not url.startswith("udp://"):
+            url = f"udp://{url}"
+        
+        if url.startswith("udp://"):
+            url = url[6:]
+        
+        repo_path = "/"
+        if "/" in url:
+            host_port, repo_path = url.split("/", 1)
+        else:
+            host_port = url
+
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                host = host_port
+                port = 7357  # Default cof port
+        else:
+            host = host_port
+            port = 7357
+        
+        return cls(
+            name=name,
+            url=f"cof://{host}:{port}/{repo_path}",
+            host=host,
+            port=port,
+            repo_path=repo_path,
+            protocol="udp"
+        )
+
+
+class RepositoryInterface:
+    """Minimal interface for repository operations used by remote module."""
+    
+    def __init__(self, path: str):
+        self.path = path
+        self.cof_dir = None
+        self.config = None
+    
+    def init(self):
+        """Initialize repository - to be implemented by concrete class."""
+        pass
+    
+    def _restore_working_tree(self):
+        """Restore working tree - to be implemented by concrete class."""
+        pass

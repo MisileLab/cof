@@ -3,8 +3,20 @@ Network protocol implementation for cof distributed version control.
 Implements UDP-based protocol with packet fragmentation and reliability.
 """
 
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
+import asyncio
 import blake3
+import json
 import logging
+import socket
+import struct
+import time
+import uuid
+
+from cof.models import RemoteRepository
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -107,52 +119,7 @@ class NetworkPacket:
         return packet
 
 
-@dataclass
-class RemoteRepository:
-    """Remote repository configuration."""
-    name: str
-    url: str
-    host: str
-    port: int
-    repo_path: str = "/"
-    protocol: str = "udp"
-    
-    @classmethod
-    def from_url(cls, name: str, url: str) -> "RemoteRepository":
-        """Create remote from URL."""
-        if url.startswith("cof://"):
-            url = url[6:]
-        elif not url.startswith("udp://"):
-            url = f"udp://{url}"
-        
-        if url.startswith("udp://"):
-            url = url[6:]
-        
-        repo_path = "/"
-        if "/" in url:
-            host_port, repo_path = url.split("/", 1)
-        else:
-            host_port = url
 
-        if ":" in host_port:
-            host, port_str = host_port.rsplit(":", 1)
-            try:
-                port = int(port_str)
-            except ValueError:
-                host = host_port
-                port = 7357  # Default cof port
-        else:
-            host = host_port
-            port = 7357
-        
-        return cls(
-            name=name,
-            url=f"cof://{host}:{port}/{repo_path}",
-            host=host,
-            port=port,
-            repo_path=repo_path,
-            protocol="udp"
-        )
 
 
 class CofProtocolError(Exception):
@@ -443,8 +410,7 @@ class NetworkClient:
             return False
 
 
-from cof.models import Commit, Tree, TreeEntry
-from cof.main import CofRepository
+from cof.models import RemoteRepository
 
 
 class NetworkServer:
@@ -514,6 +480,10 @@ class NetworkServer:
     async def _process_packet(self, packet: NetworkPacket) -> Optional[NetworkPacket]:
         """Process packet and return response."""
         try:
+            import importlib
+            main_module = importlib.import_module('.main', package='cof')
+            CofRepository = main_module.CofRepository
+            
             repo_path = self.root_dir / packet.repo_path
             repository = CofRepository(str(repo_path))
 

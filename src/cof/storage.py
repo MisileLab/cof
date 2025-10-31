@@ -6,7 +6,7 @@ Implements hot/warm/cold storage tiers with zstd compression.
 import os
 import json
 import zstandard as zstd
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from blake3 import blake3
 
@@ -16,7 +16,7 @@ from cof.models import Block, StorageTier, BlockMap
 class BlockStorage:
     """Manages block storage across different tiers with compression."""
 
-    def __init__(self, cof_dir: str, config: Dict):
+    def __init__(self, cof_dir: str, config: Dict[str, Any]):
         self.cof_dir = Path(cof_dir)
         self.config = config
         
@@ -166,9 +166,9 @@ class BlockStorage:
             self._save_block_map()
             print(f"Migrated {len(migrated_blocks)} blocks between tiers")
 
-    def get_deduplication_stats(self) -> Dict:
+    def get_deduplication_stats(self) -> Dict[str, Any]:
         """Get deduplication and storage statistics."""
-        stats = {
+        stats: Dict[str, Any] = {
             "total_blocks": len(self.block_map.hash_to_refcount),
             "unique_blocks": len(self.block_map.hash_to_location),
             "tier_distribution": {
@@ -186,7 +186,9 @@ class BlockStorage:
         
         for block_hash, tier_str in self.block_map.hash_to_location.items():
             tier = StorageTier(tier_str)
-            stats["tier_distribution"][tier.value] += 1
+            tier_dist = stats["tier_distribution"]
+            if isinstance(tier_dist, dict):
+                tier_dist[tier.value] = tier_dist.get(tier.value, 0) + 1
             
             # Get block size
             block_path = self._get_block_path(block_hash, tier)
@@ -212,8 +214,9 @@ class BlockStorage:
         
         # Calculate reference statistics
         total_refs = sum(self.block_map.hash_to_refcount.values())
-        if stats["unique_blocks"] > 0:
-            stats["avg_references"] = total_refs / stats["unique_blocks"]
+        unique_blocks = stats["unique_blocks"]
+        if isinstance(unique_blocks, int) and unique_blocks > 0:
+            stats["avg_references"] = total_refs / unique_blocks
         else:
             stats["avg_references"] = 0
         

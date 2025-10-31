@@ -13,31 +13,16 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union, Any
 import click
 import base64
 
-try:
-    import cryptography
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa, padding
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    from cryptography.fernet import Fernet
-    CRYPTOGRAPHY_AVAILABLE = True
-except ImportError:
-    CRYPTOGRAPHY_AVAILABLE = False
-    # Create dummy classes for type hints
-    class hashes:
-        class SHA256:
-            pass
-    class serialization:
-        pass
-    class rsa:
-        pass
-    class padding:
-        pass
-    class PBKDF2HMAC:
-        pass
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding, utils
+from cryptography.hazmat.primitives.asymmetric.padding import PSS, MGF1
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.fernet import Fernet
 
 
 class AuthMethod(Enum):
@@ -67,7 +52,7 @@ class User:
     last_login: Optional[int] = None
     is_active: bool = True
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "username": self.username,
@@ -84,7 +69,7 @@ class User:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "User":
+    def from_dict(cls, data: Dict[str, Any]) -> "User":
         """Create from dictionary."""
         user = cls(
             username=data["username"],
@@ -118,7 +103,7 @@ class AuthToken:
         """Check if token is expired."""
         return time.time() > self.expires_at
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
             "token_id": self.token_id,
@@ -130,7 +115,7 @@ class AuthToken:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "AuthToken":
+    def from_dict(cls, data: Dict[str, Any]) -> "AuthToken":
         """Create from dictionary."""
         return cls(
             token_id=data["token_id"],
@@ -198,7 +183,7 @@ class AuthManager:
         with open(self.tokens_file, "w") as f:
             json.dump(data, f, indent=2)
 
-    def _load_config(self) -> Dict:
+    def _load_config(self) -> Dict[str, Any]:
         """Load auth configuration."""
         default_config = {
             "token_expiry_hours": 24,
@@ -225,20 +210,13 @@ class AuthManager:
         if salt is None:
             salt = secrets.token_hex(16)
         
-        if CRYPTOGRAPHY_AVAILABLE:
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt.encode(),
-                iterations=100000,
-            )
-            password_hash = base64.urlsafe_b64encode(kdf.derive(password.encode())).decode()
-        else:
-            # Fallback to simple hashing
-            password_hash = hashlib.pbkdf2_hmac(
-                'sha256', password.encode(), salt.encode(), 100000
-            ).hex()
-        
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt.encode(),
+            iterations=100000,
+        )
+        password_hash = base64.urlsafe_b64encode(kdf.derive(password.encode())).decode()
         return password_hash, salt
 
     def _verify_password(self, password: str, password_hash: str, salt: str) -> bool:
@@ -443,7 +421,7 @@ class ClientAuth:
         self.credentials_file = self.auth_dir / "credentials.json"
         self.credentials = self._load_credentials()
 
-    def _load_credentials(self) -> Dict:
+    def _load_credentials(self) -> Dict[str, Any]:
         """Load stored credentials."""
         if self.credentials_file.exists():
             with open(self.credentials_file, "r") as f:
@@ -486,9 +464,6 @@ class ClientAuth:
 
 def generate_ssh_keypair(key_size: int = 2048) -> Tuple[str, str]:
     """Generate SSH key pair."""
-    if not CRYPTOGRAPHY_AVAILABLE:
-        raise click.ClickException("Cryptography library is required for SSH key generation.")
-    
     # Generate private key
     private_key = rsa.generate_private_key(
         public_exponent=65537,
@@ -514,23 +489,28 @@ def generate_ssh_keypair(key_size: int = 2048) -> Tuple[str, str]:
 
 def verify_ssh_signature(message: bytes, signature: bytes, public_key: str) -> bool:
     """Verify SSH signature."""
-    if not CRYPTOGRAPHY_AVAILABLE:
-        return False
-    
     try:
         # Load public key
         key = serialization.load_ssh_public_key(public_key.encode())
+        hasher = hashes.SHA256()
         
-        # Verify signature
-        key.verify(
-            signature,
-            message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-        return True
+        # Compute message digest
+        message_digest = hashes.Hash(hasher)
+        message_digest.update(message)
+        digest = message_digest.finalize()
+        
+        # Verify signature with PSS padding
+        if isinstance(key, RSAPublicKey):
+            key.verify(
+                signature,
+                digest,
+                PSS(
+                    mgf=MGF1(hasher),
+                    salt_length=PSS.MAX_LENGTH
+                ),
+                hasher
+            )
+            return True
+        return False
     except Exception:
         return False

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 import click
 
-from cof.network import NetworkClient, RemoteRepository, CofProtocolError
-from cof.models import Commit, Tree, TreeEntry
+from cof.network import NetworkClient, CofProtocolError
+from cof.models import Commit, Tree, TreeEntry, RemoteRepository, RepositoryInterface
 
 
 class RemoteManager:
@@ -75,14 +75,9 @@ class RemoteManager:
         
         click.echo(f"Removed remote '{name}'")
 
-    def list_remotes(self) -> None:
+    def list_remotes(self) -> Dict[str, RemoteRepository]:
         """List all remote repositories."""
-        if not self.remotes:
-            click.echo("No remotes configured.")
-            return
-        
-        for name, remote in self.remotes.items():
-            click.echo(f"{name}\t{remote.url}")
+        return self.remotes
 
     def get_remote(self, name: str) -> Optional[RemoteRepository]:
         """Get a remote repository by name."""
@@ -114,11 +109,16 @@ class RemoteOperations:
             target_path.mkdir(parents=True, exist_ok=True)
             
             # Create temporary repository for cloning
-            from .main import CofRepository
+            import importlib
+            main_module = importlib.import_module('.main', package='cof')
+            CofRepository = main_module.CofRepository
             temp_repo = CofRepository(str(target_path))
             temp_repo.init()
             
             # Connect to remote and fetch data
+            if not temp_repo.config:
+                raise click.ClickException("Repository configuration not loaded.")
+                
             async with NetworkClient(temp_repo.config) as client:
                 if not await client.handshake(remote):
                     raise click.ClickException("Failed to connect to remote repository.")
