@@ -12,10 +12,10 @@ Cof is a version control system (VCS) designed and optimized for handling large 
 
 ## Installation
 
-You can install Cof using `pip`:
+You can install Cof using `uv`:
 
 ```bash
-pip install .
+uv sync
 ```
 
 ## Getting Started
