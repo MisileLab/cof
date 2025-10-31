@@ -354,7 +354,7 @@ class RemoteOperations:
         """Start the cof server."""
         from cof.network import NetworkServer
         
-        server = NetworkServer(self.repository, self.repository.config)
+        server = NetworkServer(os.getcwd(), self.repository.config)
         server.host = host
         server.port = port
         

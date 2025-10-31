@@ -3,16 +3,7 @@ Network protocol implementation for cof distributed version control.
 Implements UDP-based protocol with packet fragmentation and reliability.
 """
 
-import asyncio
-import json
-import socket
-import struct
-import time
-import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, List, Optional, Any, Tuple
-import hashlib
+import blake3
 import logging
 
 # Set up logging
@@ -42,6 +33,7 @@ class NetworkPacket:
     """Network packet structure."""
     packet_type: PacketType
     session_id: str
+    repo_path: str
     sequence: int
     total_packets: int
     payload: bytes
@@ -52,20 +44,22 @@ class NetworkPacket:
         self.checksum = self._calculate_checksum()
 
     def _calculate_checksum(self) -> str:
-        """Calculate SHA-256 checksum of packet data."""
+        """Calculate BLAKE3 checksum of packet data."""
         data = self.pack_without_checksum()
-        return hashlib.sha256(data).hexdigest()[:16]
+        return blake3.blake3(data).hexdigest()[:16]
 
     def pack_without_checksum(self) -> bytes:
         """Pack packet without checksum for calculation."""
+        repo_path_bytes = self.repo_path.encode('utf-8')
         header = struct.pack(
-            "!B16sII",
+            "!B16sHII",
             self.packet_type.value,
             self.session_id.encode('utf-8')[:16],
+            len(repo_path_bytes),
             self.sequence,
             self.total_packets
         )
-        return header + self.payload
+        return header + repo_path_bytes + self.payload
 
     def pack(self) -> bytes:
         """Pack complete packet."""
@@ -76,32 +70,35 @@ class NetworkPacket:
     @classmethod
     def unpack(cls, data: bytes) -> "NetworkPacket":
         """Unpack packet from bytes."""
-        if len(data) < 25:  # Minimum packet size
+        if len(data) < 27:  # Minimum packet size
             raise ValueError("Packet too small")
 
         checksum = data[:16].decode('utf-8')
         packet_data = data[16:]
 
         # Verify checksum
-        calculated_checksum = hashlib.sha256(packet_data).hexdigest()[:16]
+        calculated_checksum = blake3.blake3(packet_data).hexdigest()[:16]
         if checksum != calculated_checksum:
             raise ValueError("Packet checksum mismatch")
 
-        if len(packet_data) < 25:
+        if len(packet_data) < 27:
             raise ValueError("Packet data too small")
 
-        packet_type_val, session_id_bytes, sequence, total_packets = struct.unpack(
-            "!B16sII", packet_data[:25]
+        packet_type_val, session_id_bytes, repo_path_len, sequence, total_packets = struct.unpack(
+            "!B16sHII", packet_data[:27]
         )
         
-        payload = packet_data[25:]
+        repo_path_bytes = packet_data[27:27 + repo_path_len]
+        payload = packet_data[27 + repo_path_len:]
         
         session_id = session_id_bytes.decode('utf-8').rstrip('\x00')
+        repo_path = repo_path_bytes.decode('utf-8')
         packet_type = PacketType(packet_type_val)
 
         packet = cls(
             packet_type=packet_type,
             session_id=session_id,
+            repo_path=repo_path,
             sequence=sequence,
             total_packets=total_packets,
             payload=payload
@@ -117,6 +114,7 @@ class RemoteRepository:
     url: str
     host: str
     port: int
+    repo_path: str = "/"
     protocol: str = "udp"
     
     @classmethod
@@ -130,22 +128,29 @@ class RemoteRepository:
         if url.startswith("udp://"):
             url = url[6:]
         
-        if ":" in url:
-            host, port_str = url.rsplit(":", 1)
+        repo_path = "/"
+        if "/" in url:
+            host_port, repo_path = url.split("/", 1)
+        else:
+            host_port = url
+
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
             try:
                 port = int(port_str)
             except ValueError:
-                host = url
+                host = host_port
                 port = 7357  # Default cof port
         else:
-            host = url
+            host = host_port
             port = 7357
         
         return cls(
             name=name,
-            url=f"cof://{host}:{port}",
+            url=f"cof://{host}:{port}/{repo_path}",
             host=host,
             port=port,
+            repo_path=repo_path,
             protocol="udp"
         )
 
@@ -189,6 +194,7 @@ class NetworkClient:
             handshake_packet = NetworkPacket(
                 packet_type=PacketType.HANDSHAKE,
                 session_id=self.session_id,
+                repo_path=remote.repo_path,
                 sequence=0,
                 total_packets=1,
                 payload=json.dumps(handshake_data).encode()
@@ -216,6 +222,7 @@ class NetworkClient:
             auth_packet = NetworkPacket(
                 packet_type=PacketType.AUTH_REQUEST,
                 session_id=self.session_id,
+                repo_path=remote.repo_path,
                 sequence=0,
                 total_packets=1,
                 payload=json.dumps(auth_data).encode()
@@ -287,7 +294,7 @@ class NetworkClient:
                 data, addr = self.socket.recvfrom(self.packet_size * 2)
                 
                 # Check if this is a fragmented packet
-                if len(data) > 25 and data[:4] == b'\x00\x00':  # Fragment indicator
+                if len(data) > 27 and data[:4] == b'\x00\x00':  # Fragment indicator
                     data = await self._receive_fragments(remote, data)
                 
                 packet = NetworkPacket.unpack(data)
@@ -347,6 +354,7 @@ class NetworkClient:
             request_packet = NetworkPacket(
                 packet_type=PacketType.OBJECT_REQUEST,
                 session_id=self.session_id,
+                repo_path=remote.repo_path,
                 sequence=0,
                 total_packets=1,
                 payload=object_hash.encode()
@@ -377,6 +385,7 @@ class NetworkClient:
             request_packet = NetworkPacket(
                 packet_type=PacketType.REF_REQUEST,
                 session_id=self.session_id,
+                repo_path=remote.repo_path,
                 sequence=0,
                 total_packets=1,
                 payload=b""
@@ -405,6 +414,7 @@ class NetworkClient:
             push_request = NetworkPacket(
                 packet_type=PacketType.PUSH_REQUEST,
                 session_id=self.session_id,
+                repo_path=remote.repo_path,
                 sequence=0,
                 total_packets=len(objects) + 1,
                 payload=json.dumps(object_list).encode()
@@ -417,6 +427,7 @@ class NetworkClient:
                 obj_packet = NetworkPacket(
                     packet_type=PacketType.DATA,
                     session_id=self.session_id,
+                    repo_path=remote.repo_path,
                     sequence=i,
                     total_packets=len(objects) + 1,
                     payload=obj_data
@@ -432,11 +443,15 @@ class NetworkClient:
             return False
 
 
+from cof.models import Commit, Tree, TreeEntry
+from cof.main import CofRepository
+
+
 class NetworkServer:
     """UDP network server for cof repository."""
 
-    def __init__(self, repository, config: Dict[str, Any]):
-        self.repository = repository
+    def __init__(self, root_dir: str, config: Dict[str, Any]):
+        self.root_dir = Path(root_dir).resolve()
         self.config = config
         self.packet_size = config["network"]["packet_size"]
         self.host = "0.0.0.0"
@@ -488,6 +503,7 @@ class NetworkServer:
             error_packet = NetworkPacket(
                 packet_type=PacketType.ERROR,
                 session_id="",
+                repo_path="",
                 sequence=0,
                 total_packets=1,
                 payload=str(e).encode()
@@ -498,10 +514,24 @@ class NetworkServer:
     async def _process_packet(self, packet: NetworkPacket) -> Optional[NetworkPacket]:
         """Process packet and return response."""
         try:
+            repo_path = self.root_dir / packet.repo_path
+            repository = CofRepository(str(repo_path))
+
+            if not repository._is_repo():
+                return NetworkPacket(
+                    packet_type=PacketType.ERROR,
+                    session_id=packet.session_id,
+                    repo_path=packet.repo_path,
+                    sequence=0,
+                    total_packets=1,
+                    payload=f"Repository not found at {packet.repo_path}".encode()
+                )
+
             if packet.packet_type == PacketType.HANDSHAKE:
                 return NetworkPacket(
                     packet_type=PacketType.HANDSHAKE_ACK,
                     session_id=packet.session_id,
+                    repo_path=packet.repo_path,
                     sequence=0,
                     total_packets=1,
                     payload=json.dumps({"status": "ok"}).encode()
@@ -509,13 +539,14 @@ class NetworkServer:
 
             elif packet.packet_type == PacketType.OBJECT_REQUEST:
                 object_hash = packet.payload.decode()
-                obj_data = self.repository._load_object(object_hash)
+                obj_data = repository._load_object(object_hash)
                 
                 if obj_data:
                     obj_bytes = json.dumps(obj_data).encode()
                     return NetworkPacket(
                         packet_type=PacketType.OBJECT_RESPONSE,
                         session_id=packet.session_id,
+                        repo_path=packet.repo_path,
                         sequence=0,
                         total_packets=1,
                         payload=obj_bytes
@@ -524,6 +555,7 @@ class NetworkServer:
                     return NetworkPacket(
                         packet_type=PacketType.ERROR,
                         session_id=packet.session_id,
+                        repo_path=packet.repo_path,
                         sequence=0,
                         total_packets=1,
                         payload=f"Object {object_hash} not found".encode()
@@ -531,7 +563,7 @@ class NetworkServer:
 
             elif packet.packet_type == PacketType.REF_REQUEST:
                 refs = {}
-                refs_dir = self.repository.cof_dir / "refs" / "heads"
+                refs_dir = repository.cof_dir / "refs" / "heads"
                 
                 if refs_dir.exists():
                     for ref_file in refs_dir.iterdir():
@@ -541,6 +573,7 @@ class NetworkServer:
                 return NetworkPacket(
                     packet_type=PacketType.REF_RESPONSE,
                     session_id=packet.session_id,
+                    repo_path=packet.repo_path,
                     sequence=0,
                     total_packets=1,
                     payload=json.dumps(refs).encode()
@@ -551,6 +584,7 @@ class NetworkServer:
                 return NetworkPacket(
                     packet_type=PacketType.PUSH_RESPONSE,
                     session_id=packet.session_id,
+                    repo_path=packet.repo_path,
                     sequence=0,
                     total_packets=1,
                     payload=json.dumps({"status": "received"}).encode()
@@ -560,6 +594,7 @@ class NetworkServer:
                 return NetworkPacket(
                     packet_type=PacketType.ERROR,
                     session_id=packet.session_id,
+                    repo_path=packet.repo_path,
                     sequence=0,
                     total_packets=1,
                     payload=f"Unknown packet type: {packet.packet_type}".encode()
@@ -570,6 +605,7 @@ class NetworkServer:
             return NetworkPacket(
                 packet_type=PacketType.ERROR,
                 session_id=packet.session_id,
+                repo_path=packet.repo_path,
                 sequence=0,
                 total_packets=1,
                 payload=str(e).encode()
