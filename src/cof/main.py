@@ -2,6 +2,7 @@
 Main CLI interface for cof version control system.
 """
 
+import logging
 import os
 import sys
 import json
@@ -944,9 +945,19 @@ class CofRepository:
 
 # CLI Commands
 @click.group()
-def cli():
+@click.option("--debug", is_flag=True, help="Enable verbose debug logging.")
+@click.pass_context
+def cli(ctx, debug):
     """Cof is a version control system optimized for binary files."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["debug"] = debug
+
+    log_level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True
+    )
 
 
 @cli.command()

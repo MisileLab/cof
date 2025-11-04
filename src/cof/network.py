@@ -157,6 +157,14 @@ class NetworkClient:
             handshake_data = {"version": "1.0", "client": "cof"}
             if auth_token:
                 handshake_data["auth_token"] = auth_token
+
+            logger.debug(
+                "Initiating handshake with %s:%s (repo=%s, session=%s)",
+                remote.host,
+                remote.port,
+                remote.repo_path,
+                self.session_id
+            )
             
             handshake_packet = NetworkPacket(
                 packet_type=PacketType.HANDSHAKE,
@@ -171,6 +179,11 @@ class NetworkClient:
 
             # Wait for handshake ACK, resending handshake on timeout
             response = await self._receive_packet(remote, resend_packet=handshake_packet)
+            logger.debug(
+                "Handshake response type=%s for session=%s",
+                response.packet_type.name,
+                self.session_id
+            )
             return response.packet_type == PacketType.HANDSHAKE_ACK
 
         except Exception as e:
@@ -185,6 +198,14 @@ class NetworkClient:
                 "password": password,
                 "timestamp": int(time.time())
             }
+
+            logger.debug(
+                "Sending auth request for user=%s to %s:%s (session=%s)",
+                username,
+                remote.host,
+                remote.port,
+                self.session_id
+            )
             
             auth_packet = NetworkPacket(
                 packet_type=PacketType.AUTH_REQUEST,
@@ -224,6 +245,15 @@ class NetworkClient:
         if len(data) > self.packet_size:
             await self._send_fragmented(remote, packet)
         else:
+            logger.debug(
+                "Sending packet type=%s seq=%d/%d (%d bytes) to %s:%s",
+                packet.packet_type.name,
+                packet.sequence,
+                packet.total_packets,
+                len(packet.payload),
+                remote.host,
+                remote.port
+            )
             self.socket.sendto(data, (remote.host, remote.port))
 
     async def _send_fragmented(self, remote: RemoteRepository, packet: NetworkPacket) -> None:
@@ -232,6 +262,14 @@ class NetworkClient:
         fragment_size = self.packet_size - 50  # Reserve space for fragment header
         
         total_fragments = (len(data) + fragment_size - 1) // fragment_size
+
+        logger.debug(
+            "Sending fragmented packet type=%s as %d fragments to %s:%s",
+            packet.packet_type.name,
+            total_fragments,
+            remote.host,
+            remote.port
+        )
         
         for i in range(total_fragments):
             start = i * fragment_size
@@ -244,6 +282,13 @@ class NetworkClient:
             
             if self.socket:
                 self.socket.sendto(fragment_packet, (remote.host, remote.port))
+                logger.debug(
+                    "Sent fragment %d/%d (%d bytes) for packet type=%s",
+                    i + 1,
+                    total_fragments,
+                    len(fragment_data),
+                    packet.packet_type.name
+                )
             await asyncio.sleep(0.001)  # Small delay between fragments
 
     async def _receive_packet(
@@ -264,6 +309,12 @@ class NetworkClient:
                     raise CofProtocolError("Socket not initialized")
                 
                 data, addr = self.socket.recvfrom(self.packet_size * 2)
+                logger.debug(
+                    "Received %d bytes from %s:%s",
+                    len(data),
+                    addr[0],
+                    addr[1]
+                )
                 
                 # Check if this is a fragmented packet
                 if len(data) > 27 and data[:4] == b'\x00\x00':  # Fragment indicator
@@ -276,12 +327,26 @@ class NetworkClient:
                     logger.warning(f"Received packet with wrong session ID: {packet.session_id}")
                     continue
                 
+                logger.debug(
+                    "Received packet type=%s seq=%d/%d for session=%s",
+                    packet.packet_type.name,
+                    packet.sequence,
+                    packet.total_packets,
+                    packet.session_id
+                )
+
                 return packet
 
             except socket.timeout:
                 logger.warning(f"Receive timeout, attempt {attempt + 1}/{self.max_retries}")
                 if resend_packet:
                     try:
+                        logger.debug(
+                            "Resending packet type=%s seq=%d/%d after timeout",
+                            resend_packet.packet_type.name,
+                            resend_packet.sequence,
+                            resend_packet.total_packets
+                        )
                         await self._send_packet(remote, resend_packet)
                     except Exception as send_err:
                         logger.error(f"Resend failed: {send_err}")
@@ -299,6 +364,14 @@ class NetworkClient:
         fragment_data = first_fragment[4:]
         
         fragments = {fragment_id: fragment_data}
+
+        logger.debug(
+            "Received fragment %d/%d (%d bytes) for session=%s",
+            fragment_id + 1,
+            total_fragments,
+            len(fragment_data),
+            self.session_id
+        )
         
         # Receive remaining fragments
         while len(fragments) < total_fragments:
@@ -310,6 +383,13 @@ class NetworkClient:
                 if len(data) >= 4 and data[:2] == b'\x00\x00':
                     frag_id, _ = struct.unpack("!HH", data[:4])
                     fragments[frag_id] = data[4:]
+                    logger.debug(
+                        "Received fragment %d/%d (%d bytes) for session=%s",
+                        frag_id + 1,
+                        total_fragments,
+                        len(data) - 4,
+                        self.session_id
+                    )
                     
             except socket.timeout:
                 break
@@ -328,6 +408,12 @@ class NetworkClient:
         """Request an object from remote repository."""
         try:
             # Send object request
+            logger.debug(
+                "Requesting object %s from %s:%s",
+                object_hash,
+                remote.host,
+                remote.port
+            )
             request_packet = NetworkPacket(
                 packet_type=PacketType.OBJECT_REQUEST,
                 session_id=self.session_id,
@@ -359,6 +445,12 @@ class NetworkClient:
     async def request_refs(self, remote: RemoteRepository) -> Dict[str, str]:
         """Request all refs from remote repository."""
         try:
+            logger.debug(
+                "Requesting refs from %s:%s (repo=%s)",
+                remote.host,
+                remote.port,
+                remote.repo_path
+            )
             request_packet = NetworkPacket(
                 packet_type=PacketType.REF_REQUEST,
                 session_id=self.session_id,
@@ -484,11 +576,31 @@ class NetworkServer:
             
         try:
             packet = NetworkPacket.unpack(data)
+            logger.debug(
+                "Server received packet type=%s seq=%d/%d from %s:%s (session=%s, repo=%s)",
+                packet.packet_type.name,
+                packet.sequence,
+                packet.total_packets,
+                addr[0],
+                addr[1],
+                packet.session_id,
+                packet.repo_path
+            )
             response = await self._process_packet(packet)
             
             if response:
                 response_data = response.pack()
                 sock.sendto(response_data, addr)
+                logger.debug(
+                    "Server sent response type=%s seq=%d/%d to %s:%s (session=%s, repo=%s)",
+                    response.packet_type.name,
+                    response.sequence,
+                    response.total_packets,
+                    addr[0],
+                    addr[1],
+                    response.session_id,
+                    response.repo_path
+                )
 
         except Exception as e:
             logger.error(f"Packet handling error: {e}")
@@ -515,6 +627,13 @@ class NetworkServer:
             
             repo_path = self.root_dir / packet.repo_path
             repository = CofRepository(str(repo_path))
+
+            logger.debug(
+                "Processing packet type=%s for repo path %s (exists=%s)",
+                packet.packet_type.name,
+                repo_path,
+                repository._is_repo()
+            )
 
             if not repository._is_repo():
                 return NetworkPacket(
