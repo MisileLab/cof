@@ -168,9 +168,9 @@ class NetworkClient:
             )
 
             await self._send_packet(remote, handshake_packet)
-            
-            # Wait for handshake ACK
-            response = await self._receive_packet(remote)
+
+            # Wait for handshake ACK, resending handshake on timeout
+            response = await self._receive_packet(remote, resend_packet=handshake_packet)
             return response.packet_type == PacketType.HANDSHAKE_ACK
 
         except Exception as e:
@@ -196,9 +196,9 @@ class NetworkClient:
             )
 
             await self._send_packet(remote, auth_packet)
-            
-            # Wait for auth response
-            response = await self._receive_packet(remote)
+
+            # Wait for auth response and resend on timeout
+            response = await self._receive_packet(remote, resend_packet=auth_packet)
             
             if response.packet_type == PacketType.AUTH_RESPONSE:
                 auth_result = json.loads(response.payload.decode())
@@ -246,7 +246,12 @@ class NetworkClient:
                 self.socket.sendto(fragment_packet, (remote.host, remote.port))
             await asyncio.sleep(0.001)  # Small delay between fragments
 
-    async def _receive_packet(self, remote: RemoteRepository, timeout: Optional[float] = None) -> NetworkPacket:
+    async def _receive_packet(
+        self,
+        remote: RemoteRepository,
+        timeout: Optional[float] = None,
+        resend_packet: Optional[NetworkPacket] = None
+    ) -> NetworkPacket:
         """Receive a packet with retry logic."""
         timeout = timeout or (self.timeout_ms / 1000.0)
         
@@ -275,6 +280,11 @@ class NetworkClient:
 
             except socket.timeout:
                 logger.warning(f"Receive timeout, attempt {attempt + 1}/{self.max_retries}")
+                if resend_packet:
+                    try:
+                        await self._send_packet(remote, resend_packet)
+                    except Exception as send_err:
+                        logger.error(f"Resend failed: {send_err}")
                 continue
             except Exception as e:
                 logger.error(f"Receive error: {e}")
@@ -328,9 +338,9 @@ class NetworkClient:
             )
 
             await self._send_packet(remote, request_packet)
-            
-            # Receive object response
-            response = await self._receive_packet(remote)
+
+            # Receive object response, resending request on timeout
+            response = await self._receive_packet(remote, resend_packet=request_packet)
             
             if response.packet_type == PacketType.OBJECT_RESPONSE:
                 return response.payload
@@ -359,8 +369,8 @@ class NetworkClient:
             )
 
             await self._send_packet(remote, request_packet)
-            
-            response = await self._receive_packet(remote)
+
+            response = await self._receive_packet(remote, resend_packet=request_packet)
             
             if response.packet_type == PacketType.REF_RESPONSE:
                 refs_data = json.loads(response.payload.decode())
