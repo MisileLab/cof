@@ -95,121 +95,191 @@ class RemoteOperations:
         self.repository = repository
         self.remote_manager = RemoteManager(repository)
 
-    async def clone_repository(self, url: str, target_dir: str) -> bool:
-        """Clone a remote repository."""
+    async def clone_repository(self, url: str, target_dir: str, depth: Optional[int] = None,
+                               path_filter: Optional[str] = None) -> bool:
+        """Clone a remote repository with optional shallow clone and path filtering."""
         try:
             # Create remote from URL
             remote = RemoteRepository.from_url("origin", url)
-            
+
             # Initialize target repository
             target_path = Path(target_dir)
             if target_path.exists() and any(target_path.iterdir()):
                 raise click.ClickException(f"Target directory '{target_dir}' is not empty.")
-            
+
             target_path.mkdir(parents=True, exist_ok=True)
-            
+
             # Create temporary repository for cloning
             import importlib
             main_module = importlib.import_module('.main', package='cof')
             CofRepository = main_module.CofRepository
             temp_repo = CofRepository(str(target_path))
             temp_repo.init()
-            
+
             # Re-initialize repository to load config
             temp_repo = CofRepository(str(target_path))
             if not temp_repo.config:
                 raise click.ClickException("Repository configuration not loaded.")
-            
+
             # Connect to remote and fetch data
-                
+
             async with NetworkClient(temp_repo.config) as client:
                 if not await client.handshake(remote):
                     raise click.ClickException("Failed to connect to remote repository.")
-                
+
                 # Fetch refs
                 refs = await client.request_refs(remote)
                 if not refs:
                     raise click.ClickException("No refs found on remote repository.")
-                
+
                 # Fetch objects for main branch
                 main_commit = refs.get("main")
                 if not main_commit:
                     raise click.ClickException("Remote repository has no main branch.")
-                
-                # Fetch all objects recursively
-                await self._fetch_objects_recursive(client, remote, main_commit, temp_repo)
-                
+
+                # Fetch all objects recursively with depth and path filtering
+                await self._fetch_objects_recursive(client, remote, main_commit, temp_repo,
+                                                   depth=depth, path_filter=path_filter)
+
                 # Update local refs
                 for ref_name, commit_hash in refs.items():
                     ref_path = temp_repo.cof_dir / "refs" / "heads" / ref_name
                     ref_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(ref_path, "w") as f:
                         f.write(commit_hash)
-                
+
                 # Set HEAD to main branch
                 with open(temp_repo.cof_dir / "HEAD", "w") as f:
                     f.write("ref: refs/heads/main")
-                
-                # Restore working tree
-                temp_repo._restore_working_tree()
-            
-            click.echo(f"Cloned repository from {url} to {target_dir}")
+
+            # Re-initialize repository after clone to load everything properly
+            import importlib
+            main_module = importlib.import_module('.main', package='cof')
+            CofRepository = main_module.CofRepository
+            final_repo = CofRepository(str(target_path))
+
+            # Restore working tree with properly initialized repo
+            final_repo._restore_working_tree()
+
+            clone_info = f"Cloned repository from {url} to {target_dir}"
+            if depth:
+                clone_info += f" (shallow clone, depth={depth})"
+            if path_filter:
+                clone_info += f" (filtered: {path_filter})"
+            click.echo(clone_info)
             return True
 
         except Exception as e:
             click.echo(f"Clone failed: {e}")
             return False
 
-    async def _fetch_objects_recursive(self, client: NetworkClient, remote: RemoteRepository, 
-                                     object_hash: str, repository, fetched: Optional[Set[str]] = None) -> None:
-        """Recursively fetch objects from remote."""
+    async def _fetch_objects_recursive(self, client: NetworkClient, remote: RemoteRepository,
+                                     object_hash: str, repository, fetched: Optional[Set[str]] = None,
+                                     depth: Optional[int] = None, current_depth: int = 0,
+                                     path_filter: Optional[str] = None) -> None:
+        """Recursively fetch objects from remote with optional depth limit and path filtering."""
         if fetched is None:
             fetched = set()
-        
+
         if object_hash in fetched:
             return
-        
+
         fetched.add(object_hash)
-        
+
         # Fetch the object
         obj_data = await client.request_object(remote, object_hash)
         if not obj_data:
             raise click.ClickException(f"Failed to fetch object {object_hash}")
-        
-        # Save object locally
+
+        # Save object locally with the original hash
         obj_dict = json.loads(obj_data.decode())
-        repository._save_object(obj_dict, "object")  # Will be saved in hot tier
-        
-        # If it's a commit, fetch its tree and parent
+        repository._save_object(obj_dict, "object", obj_hash=object_hash)  # Will be saved in hot tier
+
+        # If it's a commit, fetch its tree and optionally parent (respecting depth)
         if "parent" in obj_dict and obj_dict["parent"]:
-            await self._fetch_objects_recursive(client, remote, obj_dict["parent"], repository, fetched)
-        
+            # Check depth limit for shallow clone
+            if depth is None or current_depth < depth - 1:
+                await self._fetch_objects_recursive(client, remote, obj_dict["parent"], repository,
+                                                   fetched, depth=depth, current_depth=current_depth + 1,
+                                                   path_filter=path_filter)
+
         if "tree_root" in obj_dict:
-            await self._fetch_tree_recursive(client, remote, obj_dict["tree_root"], repository, fetched)
+            await self._fetch_tree_recursive(client, remote, obj_dict["tree_root"], repository,
+                                           fetched, path_filter=path_filter)
 
     async def _fetch_tree_recursive(self, client: NetworkClient, remote: RemoteRepository,
-                                  tree_hash: str, repository, fetched: Set[str]) -> None:
-        """Recursively fetch tree objects."""
+                                  tree_hash: str, repository, fetched: Set[str],
+                                  path_filter: Optional[str] = None, current_path: str = "") -> None:
+        """Recursively fetch tree objects with optional path filtering."""
         if tree_hash in fetched:
             return
-        
+
         # Fetch tree object
         obj_data = await client.request_object(remote, tree_hash)
         if not obj_data:
             raise click.ClickException(f"Failed to fetch tree {tree_hash}")
-        
+
         fetched.add(tree_hash)
-        
-        # Save tree object
+
+        # Save tree object with the original hash
         tree_dict = json.loads(obj_data.decode())
-        repository._save_object(tree_dict, "object")
-        
-        # Fetch all blob objects in the tree
+        repository._save_object(tree_dict, "object", obj_hash=tree_hash)
+
+        # Fetch all blob objects in the tree (with path filtering)
         if "entries" in tree_dict:
-            for entry_data in tree_dict["entries"].values():
+            for entry_name, entry_data in tree_dict["entries"].items():
+                entry_path = os.path.join(current_path, entry_name) if current_path else entry_name
+
+                # Apply path filter if specified
+                if path_filter and not self._matches_filter(entry_path, path_filter):
+                    continue
+
                 blob_hash = entry_data["hash"]
                 if blob_hash not in fetched:
-                    await self._fetch_objects_recursive(client, remote, blob_hash, repository, fetched)
+                    # Fetch blob object
+                    blob_data = await client.request_object(remote, blob_hash)
+                    if not blob_data:
+                        raise click.ClickException(f"Failed to fetch blob {blob_hash}")
+
+                    fetched.add(blob_hash)
+
+                    # Save blob object
+                    blob_dict = json.loads(blob_data.decode())
+                    repository._save_object(blob_dict, "object", obj_hash=blob_hash)
+
+                    # Fetch blocks for this blob
+                    if "block_hashes" in blob_dict:
+                        for block_hash in blob_dict["block_hashes"]:
+                            if block_hash not in fetched:
+                                block_data = await client.request_block(remote, block_hash)
+                                if not block_data:
+                                    raise click.ClickException(f"Failed to fetch block {block_hash}")
+
+                                fetched.add(block_hash)
+
+                                # Store block in the repository's storage
+                                # We need to get the current commit sequence for storage
+                                commit_seq = 0  # Default for cloned blocks
+                                stored_hash = repository.storage.store_block(block_data, commit_seq)
+
+                                if stored_hash != block_hash:
+                                    click.echo(f"Warning: Block hash mismatch: {stored_hash} != {block_hash}")
+
+    def _matches_filter(self, path: str, filter_pattern: str) -> bool:
+        """Check if a path matches the filter pattern."""
+        import fnmatch
+        # Support glob patterns like 'docs/*' or 'src/**/*.py'
+        if '**' in filter_pattern:
+            # Convert ** to match any number of directories
+            pattern_parts = filter_pattern.split('**')
+            if len(pattern_parts) == 2:
+                prefix, suffix = pattern_parts
+                if prefix and not path.startswith(prefix.rstrip('/')):
+                    return False
+                if suffix:
+                    return fnmatch.fnmatch(path, f"*{suffix.lstrip('/')}")
+                return True
+        return fnmatch.fnmatch(path, filter_pattern)
 
     async def push_to_remote(self, remote_name: str, branch: str = "main") -> bool:
         """Push commits to remote repository."""

@@ -37,6 +37,8 @@ class PacketType(Enum):
     REF_RESPONSE = 0x0A
     PUSH_REQUEST = 0x0B
     PUSH_RESPONSE = 0x0C
+    BLOCK_REQUEST = 0x0D
+    BLOCK_RESPONSE = 0x0E
     ERROR = 0xFF
 
 
@@ -62,16 +64,17 @@ class NetworkPacket:
 
     def pack_without_checksum(self) -> bytes:
         """Pack packet without checksum for calculation."""
+        session_id_bytes = self.session_id.encode('utf-8')
         repo_path_bytes = self.repo_path.encode('utf-8')
         header = struct.pack(
-            "!B16sHII",
+            "!BHHII",
             self.packet_type.value,
-            self.session_id.encode('utf-8')[:16],
+            len(session_id_bytes),
             len(repo_path_bytes),
             self.sequence,
             self.total_packets
         )
-        return header + repo_path_bytes + self.payload
+        return header + session_id_bytes + repo_path_bytes + self.payload
 
     def pack(self) -> bytes:
         """Pack complete packet."""
@@ -82,7 +85,8 @@ class NetworkPacket:
     @classmethod
     def unpack(cls, data: bytes) -> "NetworkPacket":
         """Unpack packet from bytes."""
-        if len(data) < 27:  # Minimum packet size
+        # Minimum size: 16 (checksum) + 11 (header with lengths)
+        if len(data) < 27:
             raise ValueError("Packet too small")
 
         checksum = data[:16].decode('utf-8')
@@ -93,17 +97,25 @@ class NetworkPacket:
         if checksum != calculated_checksum:
             raise ValueError("Packet checksum mismatch")
 
-        if len(packet_data) < 27:
+        # Header is now 13 bytes: 1 (type) + 2 (session_id_len) + 2 (repo_path_len) + 4 (sequence) + 4 (total_packets)
+        if len(packet_data) < 13:
             raise ValueError("Packet data too small")
 
-        packet_type_val, session_id_bytes, repo_path_len, sequence, total_packets = struct.unpack(
-            "!B16sHII", packet_data[:27]
+        packet_type_val, session_id_len, repo_path_len, sequence, total_packets = struct.unpack(
+            "!BHHII", packet_data[:13]
         )
-        
-        repo_path_bytes = packet_data[27:27 + repo_path_len]
-        payload = packet_data[27 + repo_path_len:]
-        
-        session_id = session_id_bytes.decode('utf-8').rstrip('\x00')
+
+        # Extract variable-length fields
+        offset = 13
+        session_id_bytes = packet_data[offset:offset + session_id_len]
+        offset += session_id_len
+
+        repo_path_bytes = packet_data[offset:offset + repo_path_len]
+        offset += repo_path_len
+
+        payload = packet_data[offset:]
+
+        session_id = session_id_bytes.decode('utf-8')
         repo_path = repo_path_bytes.decode('utf-8')
         packet_type = PacketType(packet_type_val)
 
@@ -442,6 +454,44 @@ class NetworkClient:
             logger.error(f"Object request failed: {e}")
             return None
 
+    async def request_block(self, remote: RemoteRepository, block_hash: str) -> Optional[bytes]:
+        """Request a block from remote repository."""
+        try:
+            # Send block request
+            logger.debug(
+                "Requesting block %s from %s:%s",
+                block_hash,
+                remote.host,
+                remote.port
+            )
+            request_packet = NetworkPacket(
+                packet_type=PacketType.BLOCK_REQUEST,
+                session_id=self.session_id,
+                repo_path=remote.repo_path,
+                sequence=0,
+                total_packets=1,
+                payload=block_hash.encode()
+            )
+
+            await self._send_packet(remote, request_packet)
+
+            # Receive block response, resending request on timeout
+            response = await self._receive_packet(remote, resend_packet=request_packet)
+
+            if response.packet_type == PacketType.BLOCK_RESPONSE:
+                return response.payload
+            elif response.packet_type == PacketType.ERROR:
+                error_msg = response.payload.decode()
+                logger.error(f"Remote error: {error_msg}")
+                return None
+            else:
+                logger.error(f"Unexpected response type: {response.packet_type}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Block request failed: {e}")
+            return None
+
     async def request_refs(self, remote: RemoteRepository) -> Dict[str, str]:
         """Request all refs from remote repository."""
         try:
@@ -531,18 +581,21 @@ class NetworkServer:
         """Start the network server."""
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setblocking(False)  # Set socket to non-blocking mode for asyncio
         self.socket.bind((self.host, self.port))
         self.running = True
-        
+
         logger.info(f"Cof server started on {self.host}:{self.port}")
-        
+
+        loop = asyncio.get_event_loop()
         active_tasks = set()
         try:
             while self.running:
                 try:
                     if not self.socket:
                         raise CofProtocolError("Socket not initialized")
-                    data, addr = self.socket.recvfrom(self.packet_size * 2)
+                    # Use asyncio-compatible socket receive
+                    data, addr = await loop.sock_recvfrom(self.socket, self.packet_size * 2)
                     # Create task and track it
                     task = asyncio.create_task(self._handle_packet(data, addr))
                     active_tasks.add(task)
@@ -658,7 +711,7 @@ class NetworkServer:
             elif packet.packet_type == PacketType.OBJECT_REQUEST:
                 object_hash = packet.payload.decode()
                 obj_data = repository._load_object(object_hash)
-                
+
                 if obj_data:
                     obj_bytes = json.dumps(obj_data).encode()
                     return NetworkPacket(
@@ -677,6 +730,29 @@ class NetworkServer:
                         sequence=0,
                         total_packets=1,
                         payload=f"Object {object_hash} not found".encode()
+                    )
+
+            elif packet.packet_type == PacketType.BLOCK_REQUEST:
+                block_hash = packet.payload.decode()
+                block_data = repository.storage.retrieve_block(block_hash)
+
+                if block_data:
+                    return NetworkPacket(
+                        packet_type=PacketType.BLOCK_RESPONSE,
+                        session_id=packet.session_id,
+                        repo_path=packet.repo_path,
+                        sequence=0,
+                        total_packets=1,
+                        payload=block_data
+                    )
+                else:
+                    return NetworkPacket(
+                        packet_type=PacketType.ERROR,
+                        session_id=packet.session_id,
+                        repo_path=packet.repo_path,
+                        sequence=0,
+                        total_packets=1,
+                        payload=f"Block {block_hash} not found".encode()
                     )
 
             elif packet.packet_type == PacketType.REF_REQUEST:

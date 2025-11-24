@@ -76,22 +76,27 @@ class CofRepository:
         
         return None
 
-    def _save_object(self, obj_data: Dict[str, Any], obj_type: str) -> str:
+    def _save_object(self, obj_data: Dict[str, Any], obj_type: str, obj_hash: Optional[str] = None) -> str:
         """Save an object and return its hash."""
         from blake3 import blake3
-        
+
         content = json.dumps(obj_data, sort_keys=True).encode('utf-8')
-        hash_hex = blake3(content).hexdigest()
-        
+
+        # Use provided hash if available (for cloned objects), otherwise calculate
+        if obj_hash is None:
+            hash_hex = blake3(content).hexdigest()
+        else:
+            hash_hex = obj_hash
+
         # Save in hot tier initially
         obj_dir = self.cof_dir / "objects" / "hot"
         obj_dir.mkdir(parents=True, exist_ok=True)
-        
+
         obj_path = obj_dir / hash_hex
         if not obj_path.exists():
             with open(obj_path, "wb") as f:
                 f.write(content)
-        
+
         return hash_hex
 
     def _load_object(self, obj_hash: str) -> Optional[Dict[str, Any]]:
@@ -581,30 +586,45 @@ class CofRepository:
 
     def _restore_working_tree(self) -> None:
         """Restore working tree to match the current branch."""
+        import logging
+        logger = logging.getLogger(__name__)
+
         if not self.storage:
-            raise click.ClickException("Storage system not initialized.")
+            logger.error("Storage system not initialized")
+            click.echo("Warning: Storage system not initialized")
+            return
 
         head_commit = self._get_head_commit()
         if not head_commit:
+            logger.debug("No HEAD commit found")
             return
 
         commit_data = self._load_object(head_commit)
         if not commit_data:
+            logger.error(f"Could not load commit {head_commit}")
             return
 
         tree = self._load_tree(commit_data["tree_root"])
+        logger.debug(f"Loaded tree with {len(tree.entries)} entries")
 
         # Restore files from tree
+        restored_count = 0
         for entry in tree.entries.values():
             try:
+                logger.debug(f"Restoring {entry.name}")
                 # Load blob data
                 blob_data = self._load_object(entry.hash.hex())
                 if not blob_data:
+                    logger.warning(f"Could not load blob for {entry.name}")
                     continue
 
                 # Reconstruct file from blocks
+                if "block_hashes" not in blob_data:
+                    logger.error(f"No block_hashes in blob data for {entry.name}")
+                    continue
+
                 file_data = self.storage.reconstruct_file(blob_data["block_hashes"])
-                
+
                 # Write file
                 file_path = self.path / entry.name
                 file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -613,9 +633,15 @@ class CofRepository:
 
                 # Set permissions
                 file_path.chmod(entry.mode)
+                restored_count += 1
+                logger.debug(f"Restored {entry.name} ({len(file_data)} bytes)")
 
             except Exception as e:
+                logger.error(f"Error restoring {entry.name}: {e}", exc_info=True)
                 click.echo(f"Warning: Could not restore {entry.name}: {e}")
+
+        logger.info(f"Restored {restored_count} files")
+        click.echo(f"Restored {restored_count} file(s) to working directory")
 
     def merge_branch(self, branch_name: str) -> None:
         """Merge another branch into the current branch."""
@@ -902,12 +928,13 @@ class CofRepository:
         for name, remote in remotes.items():
             click.echo(f"  {name}\t{remote.url} ({remote.host}:{remote.port})")
     
-    async def clone_repository(self, url: str, target_dir: str) -> None:
+    async def clone_repository(self, url: str, target_dir: str, depth: Optional[int] = None,
+                               path_filter: Optional[str] = None) -> None:
         """Clone a remote repository."""
         from cof.remote import RemoteOperations
-        
+
         remote_ops = RemoteOperations(self)
-        success = await remote_ops.clone_repository(url, target_dir)
+        success = await remote_ops.clone_repository(url, target_dir, depth=depth, path_filter=path_filter)
         if not success:
             raise click.ClickException("Failed to clone repository.")
     
@@ -1144,16 +1171,18 @@ def list():
 @cli.command()
 @click.argument("url")
 @click.argument("target_dir", required=False)
-def clone(url, target_dir):
+@click.option("--depth", type=int, default=None, help="Create a shallow clone with history truncated to the specified number of commits")
+@click.option("--filter", "path_filter", default=None, help="Filter objects by path (e.g., 'docs/*' or 'src/**/*.py')")
+def clone(url, target_dir, depth, path_filter):
     """Clone a remote repository."""
     import asyncio
-    
+
     if not target_dir:
         # Extract repository name from URL
         target_dir = url.split("/")[-1].replace(".git", "")
-    
+
     repo = CofRepository(target_dir)
-    asyncio.run(repo.clone_repository(url, target_dir))
+    asyncio.run(repo.clone_repository(url, target_dir, depth=depth, path_filter=path_filter))
 
 
 @cli.command()
