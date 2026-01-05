@@ -264,7 +264,67 @@ class CofRepository:
         except Exception as e:
             raise click.ClickException(f"Error initializing repository: {e}")
 
-    def add_files(self, files: List[str]) -> None:
+    def _collect_add_paths(self, files: List[str], add_all: bool) -> List[Path]:
+        targets = [str(self.path)] if add_all else list(files)
+        ignore_patterns = self._load_ignore_patterns()
+        collected: List[Path] = []
+        seen: Dict[str, bool] = {}
+
+        for target in targets:
+            target_path = Path(target).resolve()
+
+            if not target_path.exists():
+                click.echo(f"Error: Path does not exist: {target_path}")
+                continue
+
+            if target_path.is_dir():
+                for root, dirs, files in os.walk(target_path, topdown=True):
+                    root_path = Path(root)
+                    try:
+                        relative_root = root_path.relative_to(self.path).as_posix()
+                    except ValueError:
+                        continue
+
+                    if COF_DIR in root_path.parts:
+                        dirs[:] = []
+                        continue
+
+                    relative_root = "" if relative_root == "." else relative_root
+
+                    kept_dirs = []
+                    for dir_name in dirs:
+                        if dir_name == COF_DIR:
+                            continue
+                        rel_dir = (
+                            f"{relative_root}/{dir_name}" if relative_root else dir_name
+                        )
+                        if self._matches_ignore(rel_dir, ignore_patterns, is_dir=True):
+                            continue
+                        kept_dirs.append(dir_name)
+                    dirs[:] = kept_dirs
+
+                    for name in files:
+                        rel_path = f"{relative_root}/{name}" if relative_root else name
+                        if self._matches_ignore(
+                            rel_path, ignore_patterns, is_dir=False
+                        ):
+                            continue
+                        file_path = (root_path / name).resolve()
+                        file_key = str(file_path)
+                        if file_key in seen:
+                            continue
+                        seen[file_key] = True
+                        collected.append(file_path)
+            else:
+                target_key = str(target_path)
+                if target_key in seen:
+                    continue
+                seen[target_key] = True
+                collected.append(target_path)
+
+        return collected
+
+    def add_files(self, files: List[str], add_all: bool = False) -> None:
         """Add files to the staging area."""
         if not self._is_repo():
             raise click.ClickException("Not a cof repository. Run 'cof init' first.")
@@ -276,11 +336,8 @@ class CofRepository:
         added_files = 0
         commit_seq = self._get_next_commit_sequence()
 
-        for file_path in files:
-            file_path = Path(file_path).resolve()
-
-            if not file_path.exists():
-                click.echo(f"Error: Path does not exist: {file_path}")
+        for file_path in self._collect_add_paths(files, add_all):
+            if not file_path.is_file():
                 continue
 
             try:
@@ -305,6 +362,8 @@ class CofRepository:
                 click.echo(f"Added '{relative_path}'")
                 added_files += 1
 
+            except ValueError:
+                click.echo(f"Error: Path is outside the repository: {file_path}")
             except Exception as e:
                 click.echo(f"Error processing file {file_path}: {e}")
 
@@ -899,13 +958,14 @@ def init():
 
 
 @cli.command()
+@click.option("-A", "--all", "add_all", is_flag=True, help="Add all files.")
 @click.argument(
-    "files", nargs=-1, type=click.Path(exists=True, dir_okay=False, resolve_path=True)
+    "files", nargs=-1, type=click.Path(exists=True, dir_okay=True, resolve_path=True)
 )
-def add(files):
+def add(files, add_all):
     """Add files to the staging area."""
     repo = CofRepository()
-    repo.add_files(files)
+    repo.add_files(files, add_all=add_all)
 
 
 @cli.command()
