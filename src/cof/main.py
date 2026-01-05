@@ -78,7 +78,7 @@ class CofRepository:
             return toml.load(f)
 
     def _load_ignore_patterns(self) -> List[str]:
-        patterns: List[str] = []
+        patterns: List[str] = [f"{COF_DIR}/"]
         for filename in (".gitignore", ".cofignore"):
             ignore_path = self.path / filename
             if not ignore_path.exists():
@@ -99,10 +99,11 @@ class CofRepository:
             raw_pattern = pattern[1:] if negated else pattern
             raw_pattern = raw_pattern.lstrip("/")
             if raw_pattern.endswith("/"):
-                if not is_dir:
-                    continue
                 raw_pattern = raw_pattern.rstrip("/")
-                patterns_to_try = [raw_pattern, f"{raw_pattern}/**"]
+                if is_dir:
+                    patterns_to_try = [raw_pattern, f"{raw_pattern}/**"]
+                else:
+                    patterns_to_try = [f"{raw_pattern}/**"]
             elif "/" in raw_pattern:
                 patterns_to_try = [raw_pattern]
             else:
@@ -278,6 +279,14 @@ class CofRepository:
                 continue
 
             if target_path.is_dir():
+                try:
+                    target_rel = target_path.relative_to(self.path).as_posix()
+                except ValueError:
+                    continue
+                if target_rel not in (".", "") and self._matches_ignore(
+                    target_rel, ignore_patterns, is_dir=True
+                ):
+                    continue
                 for root, dirs, files in os.walk(target_path, topdown=True):
                     root_path = Path(root)
                     try:
@@ -316,6 +325,12 @@ class CofRepository:
                         seen[file_key] = True
                         collected.append(file_path)
             else:
+                try:
+                    rel_path = target_path.relative_to(self.path).as_posix()
+                except ValueError:
+                    continue
+                if self._matches_ignore(rel_path, ignore_patterns, is_dir=False):
+                    continue
                 target_key = str(target_path)
                 if target_key in seen:
                     continue
