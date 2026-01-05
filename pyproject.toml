@@ -9,9 +9,6 @@ dependencies = [
     "blake3",
     "zstandard",
     "toml",
-    "aiofiles",
-    "asyncio-mqtt",
-    "cryptography",
 ]
 
 [tool.uv]

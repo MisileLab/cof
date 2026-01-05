@@ -9,17 +9,46 @@ import json
 import time
 import click
 import toml
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, ClassVar
 
-from cof.models import Commit, Tree, TreeEntry, StagedFile, BlockMap, RemoteRepository
+from cof.models import Tree, TreeEntry, StagedFile
 from cof.storage import BlockStorage
-from cof.auth import AuthManager, ClientAuth, Permission, generate_ssh_keypair
-from cof.remote import RemoteManager
 
 
 COF_DIR = ".cof"
+
+
+class ColorFormatter(logging.Formatter):
+    """Logging formatter with optional ANSI colors."""
+
+    LEVEL_COLORS: ClassVar[Dict[str, str]] = {
+        "DEBUG": "\033[36m",
+        "INFO": "\033[32m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
+        "CRITICAL": "\033[35m",
+    }
+    RESET: ClassVar[str] = "\033[0m"
+    use_color: bool
+
+    def __init__(self, fmt: str, use_color: bool) -> None:
+        super().__init__(fmt)
+        self.use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        if not self.use_color:
+            return message
+
+        color = self.LEVEL_COLORS.get(record.levelname)
+        if not color:
+            return message
+
+        return message.replace(
+            record.levelname, f"{color}{record.levelname}{self.RESET}"
+        )
 
 
 class CofRepository:
@@ -29,10 +58,11 @@ class CofRepository:
         self.path = Path(path).resolve()
         self.cof_dir = self.path / COF_DIR
         self.config = self._load_config() if self._is_repo() else None
-        self.storage = BlockStorage(str(self.cof_dir), self.config) if self._is_repo() and self.config else None
-        self.auth_manager = AuthManager(self.cof_dir) if self._is_repo() else None
-        self.client_auth = ClientAuth(self.cof_dir) if self._is_repo() else None
-        self.remote_manager = RemoteManager(self) if self._is_repo() else None
+        self.storage = (
+            BlockStorage(str(self.cof_dir), self.config)
+            if self._is_repo() and self.config
+            else None
+        )
 
     def _is_repo(self) -> bool:
         """Check if current directory is a cof repository."""
@@ -42,21 +72,56 @@ class CofRepository:
         """Load repository configuration."""
         if not self._is_repo():
             return None
-        
+
         config_path = self.cof_dir / "config.toml"
         with open(config_path, "r") as f:
             return toml.load(f)
+
+    def _load_ignore_patterns(self) -> List[str]:
+        patterns: List[str] = []
+        for filename in (".gitignore", ".cofignore"):
+            ignore_path = self.path / filename
+            if not ignore_path.exists():
+                continue
+            for line in ignore_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                patterns.append(stripped)
+        return patterns
+
+    def _matches_ignore(self, rel_path: str, patterns: List[str], is_dir: bool) -> bool:
+        normalized = rel_path.replace(os.sep, "/").lstrip("./")
+        path_obj = PurePosixPath(normalized)
+        matched = False
+        for pattern in patterns:
+            negated = pattern.startswith("!")
+            raw_pattern = pattern[1:] if negated else pattern
+            raw_pattern = raw_pattern.lstrip("/")
+            if raw_pattern.endswith("/"):
+                if not is_dir:
+                    continue
+                raw_pattern = raw_pattern.rstrip("/")
+                patterns_to_try = [raw_pattern, f"{raw_pattern}/**"]
+            elif "/" in raw_pattern:
+                patterns_to_try = [raw_pattern]
+            else:
+                patterns_to_try = [f"**/{raw_pattern}"]
+
+            if any(path_obj.match(pat) for pat in patterns_to_try):
+                matched = not negated
+        return matched
 
     def _get_current_branch(self) -> str:
         """Get the current branch name."""
         head_path = self.cof_dir / "HEAD"
         with open(head_path, "r") as f:
             content = f.read().strip()
-        
+
         if content.startswith("ref: "):
             ref_path = content.split(" ", 1)[1]
             return ref_path.split("/")[-1]
-        
+
         return "HEAD"
 
     def _get_branch_ref_path(self, branch: str) -> Path:
@@ -68,19 +133,21 @@ class CofRepository:
         branch = self._get_current_branch()
         if branch == "HEAD":
             return None
-        
+
         ref_path = self._get_branch_ref_path(branch)
         if ref_path.exists():
             with open(ref_path, "r") as f:
                 return f.read().strip()
-        
+
         return None
 
-    def _save_object(self, obj_data: Dict[str, Any], obj_type: str, obj_hash: Optional[str] = None) -> str:
+    def _save_object(
+        self, obj_data: Dict[str, Any], obj_type: str, obj_hash: Optional[str] = None
+    ) -> str:
         """Save an object and return its hash."""
         from blake3 import blake3
 
-        content = json.dumps(obj_data, sort_keys=True).encode('utf-8')
+        content = json.dumps(obj_data, sort_keys=True).encode("utf-8")
 
         # Use provided hash if available (for cloned objects), otherwise calculate
         if obj_hash is None:
@@ -107,18 +174,19 @@ class CofRepository:
             if obj_path.exists():
                 with open(obj_path, "rb") as f:
                     content = f.read()
-                    
+
                     # Decompress if not in hot tier
                     if tier != "hot":
                         import zstandard as zstd
+
                         decompressor = zstd.ZstdDecompressor()
                         content = decompressor.decompress(content)
-                    
+
                     try:
-                        return json.loads(content.decode('utf-8'))
+                        return json.loads(content.decode("utf-8"))
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         return None
-        
+
         return None
 
     def _load_tree(self, tree_hash: str) -> Tree:
@@ -149,13 +217,13 @@ class CofRepository:
             self.cof_dir.mkdir(exist_ok=True)
             dirs = [
                 "objects/hot",
-                "objects/warm", 
+                "objects/warm",
                 "objects/cold",
                 "refs/heads",
                 "index",
-                "locks"
+                "locks",
             ]
-            
+
             for dir_path in dirs:
                 (self.cof_dir / dir_path).mkdir(parents=True, exist_ok=True)
 
@@ -164,29 +232,20 @@ class CofRepository:
                 "core": {
                     "block_size": 4096,
                     "hash_algorithm": "blake3",
-                    "cache_size_mb": 256
+                    "cache_size_mb": 256,
                 },
                 "compression": {
                     "warm_threshold": 10,
                     "cold_threshold": 100,
                     "warm_level": 3,
-                    "cold_level": 19
+                    "cold_level": 19,
                 },
-                "network": {
-                    "protocol": "udp",
-                    "packet_size": 1400,
-                    "timeout_ms": 5000,
-                    "max_retries": 3
-                },
-                "gc": {
-                    "auto_gc": True,
-                    "unreachable_days": 30
-                }
+                "gc": {"auto_gc": True, "unreachable_days": 30},
             }
 
             with open(self.cof_dir / "config.toml", "w") as f:
                 toml.dump(config, f)
-            
+
             # Update instance config
             self.config = config
 
@@ -197,6 +256,8 @@ class CofRepository:
             # Create main branch
             main_ref = self._get_branch_ref_path("main")
             main_ref.parent.mkdir(parents=True, exist_ok=True)
+
+            self.storage = BlockStorage(str(self.cof_dir), self.config)
 
             click.echo(f"Initialized empty cof repository in {self.cof_dir}")
 
@@ -217,7 +278,7 @@ class CofRepository:
 
         for file_path in files:
             file_path = Path(file_path).resolve()
-            
+
             if not file_path.exists():
                 click.echo(f"Error: Path does not exist: {file_path}")
                 continue
@@ -226,18 +287,20 @@ class CofRepository:
                 # Get file stats
                 stat = file_path.stat()
                 relative_path = str(file_path.relative_to(self.path))
-                
+
                 # Process file into blocks
-                block_hashes = self.storage.process_file_blocks(str(file_path), commit_seq)
-                
+                block_hashes = self.storage.process_file_blocks(
+                    str(file_path), commit_seq
+                )
+
                 # Create staged file entry
                 staged_file = StagedFile(
                     path=relative_path,
                     block_hashes=block_hashes,
                     size=stat.st_size,
-                    mode=stat.st_mode & 0o777
+                    mode=stat.st_mode & 0o777,
                 )
-                
+
                 staging_area[relative_path] = staged_file.to_dict()
                 click.echo(f"Added '{relative_path}'")
                 added_files += 1
@@ -247,7 +310,9 @@ class CofRepository:
 
         if added_files > 0:
             self._save_staging_area(staging_area)
-            click.echo(f"\nSuccessfully added {added_files} file(s) to the staging area.")
+            click.echo(
+                f"\nSuccessfully added {added_files} file(s) to the staging area."
+            )
 
     def _load_staging_area(self) -> Dict[str, Any]:
         """Load the staging area."""
@@ -285,7 +350,7 @@ class CofRepository:
 
         # Get parent commit
         parent_commit = self._get_head_commit()
-        
+
         # Load current tree or create new one
         if parent_commit:
             parent_data = self._load_object(parent_commit)
@@ -299,21 +364,21 @@ class CofRepository:
         # Update tree with staged files
         for file_path, file_data in staging_data.items():
             staged_file = StagedFile.from_dict(file_data)
-            
+
             # Create a blob object for the file
             blob_data = {
                 "type": "blob",
                 "block_hashes": staged_file.block_hashes,
-                "size": staged_file.size
+                "size": staged_file.size,
             }
             blob_hash = self._save_object(blob_data, "blob")
-            
+
             # Create tree entry
             tree_entry = TreeEntry(
                 name=staged_file.path,
                 mode=staged_file.mode,
                 hash=bytes.fromhex(blob_hash),
-                size=staged_file.size
+                size=staged_file.size,
             )
             tree.add_entry(tree_entry)
 
@@ -329,19 +394,19 @@ class CofRepository:
             "timestamp": int(time.time()),
             "author": os.environ.get("USER", "user@example.com"),
             "message": message,
-            "sequence": commit_seq
+            "sequence": commit_seq,
         }
 
         # Save commit and set its ID
         commit_hash = self._save_object(commit_data, "commit")
         commit_data["id"] = commit_hash
-        
+
         # Update commit object with its ID
         for tier in ["hot", "warm", "cold"]:
             commit_path = self.cof_dir / "objects" / tier / commit_hash
             if commit_path.exists():
                 with open(commit_path, "wb") as f:
-                    content = json.dumps(commit_data, sort_keys=True).encode('utf-8')
+                    content = json.dumps(commit_data, sort_keys=True).encode("utf-8")
                     f.write(content)
                 break
 
@@ -379,13 +444,13 @@ class CofRepository:
 
             click.echo(f"commit {commit_hash}")
             click.echo(f"Author: {commit_data.get('author', 'Unknown')}")
-            
-            timestamp = commit_data.get('timestamp')
+
+            timestamp = commit_data.get("timestamp")
             if timestamp:
                 dt = datetime.fromtimestamp(timestamp)
                 click.echo(f"Date:   {dt.strftime('%a %b %d %H:%M:%S %Y')}")
-            
-            message = commit_data.get('message', '')
+
+            message = commit_data.get("message", "")
             click.echo(f"\n    {message.replace(chr(10), chr(10) + '    ')}")
             click.echo()
 
@@ -416,20 +481,20 @@ class CofRepository:
         # Show changes to be committed
         click.echo("Changes to be committed:")
         click.echo("  (use 'cof reset <file>...' to unstage)")
-        
+
         new_files = []
         modified_files = []
-        
+
         for file_path, file_data in staged_data.items():
             staged_file = StagedFile.from_dict(file_data)
-            
+
             # Check if file exists in current tree
             tree_entry = None
             for entry in tree.entries.values():
                 if entry.name == file_path:
                     tree_entry = entry
                     break
-            
+
             if tree_entry is None:
                 new_files.append(file_path)
             else:
@@ -452,15 +517,30 @@ class CofRepository:
 
         tracked_files = set(tree.entries.keys()) | set(staged_data.keys())
         untracked_files = set()
-        ignore_dirs = {COF_DIR, ".venv", "__pycache__", ".git", ".egg-info"}
+        ignore_patterns = self._load_ignore_patterns()
 
-        for root, dirs, files in os.walk(".", topdown=True):
-            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.endswith('.egg-info')]
+        for root, dirs, files in os.walk(self.path, topdown=True):
+            root_path = Path(root)
+            try:
+                relative_root = root_path.relative_to(self.path).as_posix()
+            except ValueError:
+                continue
+            relative_root = "" if relative_root == "." else relative_root
+
+            kept_dirs = []
+            for dir_name in dirs:
+                rel_path = f"{relative_root}/{dir_name}" if relative_root else dir_name
+                if self._matches_ignore(rel_path, ignore_patterns, is_dir=True):
+                    continue
+                kept_dirs.append(dir_name)
+            dirs[:] = kept_dirs
+
             for name in files:
-                path = Path(root) / name
-                relative_path = str(path)
-                if relative_path not in tracked_files:
-                    untracked_files.add(relative_path)
+                rel_path = f"{relative_root}/{name}" if relative_root else name
+                if self._matches_ignore(rel_path, ignore_patterns, is_dir=False):
+                    continue
+                if rel_path not in tracked_files:
+                    untracked_files.add(rel_path)
 
         if not untracked_files:
             click.echo("\tnothing to add to commit")
@@ -477,22 +557,24 @@ class CofRepository:
             raise click.ClickException("Storage system not initialized.")
 
         stats = self.storage.get_deduplication_stats()
-        
+
         click.echo("Deduplication Statistics:")
         click.echo(f"  Total blocks: {stats['total_blocks']}")
         click.echo(f"  Unique blocks: {stats['unique_blocks']}")
         click.echo(f"  Average references: {stats.get('avg_references', 0):.2f}")
         click.echo()
         click.echo("Storage by tier:")
-        for tier, count in stats['tier_distribution'].items():
+        for tier, count in stats["tier_distribution"].items():
             click.echo(f"  {tier.upper()}: {count} blocks")
         click.echo()
         click.echo(f"  Raw size: {stats['total_size_raw']:,} bytes")
         click.echo(f"  Compressed size: {stats['total_size_compressed']:,} bytes")
-        if stats['deduplication_ratio'] > 0:
+        if stats["deduplication_ratio"] > 0:
             click.echo(f"  Compression ratio: {stats['deduplication_ratio']:.2f}x")
 
-    def create_branch(self, branch_name: str, start_point: Optional[str] = None) -> None:
+    def create_branch(
+        self, branch_name: str, start_point: Optional[str] = None
+    ) -> None:
         """Create a new branch."""
         if not self._is_repo():
             raise click.ClickException("Not a cof repository. Run 'cof init' first.")
@@ -534,11 +616,11 @@ class CofRepository:
             for branch_file in branches:
                 branch_name = branch_file.name
                 marker = "* " if branch_name == current_branch else "  "
-                
+
                 # Get commit hash
                 with open(branch_file, "r") as f:
                     commit_hash = f.read().strip()
-                
+
                 click.echo(f"{marker}{branch_name} {commit_hash[:7]}")
         else:
             click.echo("No branches found.")
@@ -558,7 +640,6 @@ class CofRepository:
         with open(head_path, "w") as f:
             f.write(f"ref: refs/heads/{branch_name}")
 
-        # Restore files from the branch
         self._restore_working_tree()
 
         click.echo(f"Switched to branch '{branch_name}'")
@@ -587,6 +668,7 @@ class CofRepository:
     def _restore_working_tree(self) -> None:
         """Restore working tree to match the current branch."""
         import logging
+
         logger = logging.getLogger(__name__)
 
         if not self.storage:
@@ -671,7 +753,7 @@ class CofRepository:
         # Load trees
         source_data = self._load_object(source_commit)
         current_data = self._load_object(current_commit)
-        
+
         if not source_data or not current_data:
             raise click.ClickException("Could not load commit data.")
 
@@ -680,7 +762,7 @@ class CofRepository:
 
         # Merge trees (simplified - just add all files from source)
         merged_tree = Tree()
-        
+
         # Add all current files
         for entry in current_tree.entries.values():
             merged_tree.add_entry(entry)
@@ -691,7 +773,7 @@ class CofRepository:
 
         # Create merge commit
         tree_hash = self._save_object(merged_tree.to_dict(), "tree")
-        
+
         commit_seq = self._get_next_commit_sequence()
         merge_commit_data = {
             "id": "",
@@ -701,7 +783,7 @@ class CofRepository:
             "author": os.environ.get("USER", "user@example.com"),
             "message": f"Merge branch '{branch_name}' into '{current_branch}'",
             "sequence": commit_seq,
-            "merge_parent": source_commit
+            "merge_parent": source_commit,
         }
 
         # Save merge commit
@@ -713,7 +795,9 @@ class CofRepository:
             commit_path = self.cof_dir / "objects" / tier / merge_hash
             if commit_path.exists():
                 with open(commit_path, "wb") as f:
-                    content = json.dumps(merge_commit_data, sort_keys=True).encode('utf-8')
+                    content = json.dumps(merge_commit_data, sort_keys=True).encode(
+                        "utf-8"
+                    )
                     f.write(content)
                 break
 
@@ -738,108 +822,6 @@ class CofRepository:
         commit_seq = self._get_next_commit_sequence()
         self.storage.garbage_collect(commit_seq)
         click.echo("Garbage collection completed.")
-
-    def create_user(self, username: str, email: str, password: str) -> None:
-        """Create a new user account."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-
-        if not self.auth_manager:
-            raise click.ClickException("Auth system not initialized.")
-
-        self.auth_manager.create_user(username, email, password)
-
-    def login_user(self, username: str, password: str) -> None:
-        """Login user and store credentials."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-
-        if not self.auth_manager or not self.client_auth:
-            raise click.ClickException("Auth system not initialized.")
-
-        user = self.auth_manager.authenticate_user(username, password)
-        if not user:
-            raise click.ClickException("Authentication failed.")
-
-        # Create token for local use
-        token = self.auth_manager.create_token(user)
-        self.client_auth.store_token("local", token)
-        
-        click.echo(f"Logged in as '{username}'")
-
-    def logout_user(self) -> None:
-        """Logout current user."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-
-        if not self.client_auth:
-            raise click.ClickException("Auth system not initialized.")
-
-        self.client_auth.remove_credentials("local")
-        click.echo("Logged out")
-
-    def whoami(self) -> None:
-        """Show current user."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-
-        if not self.auth_manager or not self.client_auth:
-            raise click.ClickException("Auth system not initialized.")
-
-        token = self.client_auth.get_token("local")
-        if not token:
-            click.echo("Not logged in")
-            return
-
-        user = self.auth_manager.validate_token(token)
-        if user:
-            click.echo(f"Logged in as: {user.username} ({user.email})")
-            click.echo(f"Last login: {time.ctime(user.last_login) if user.last_login else 'Never'}")
-        else:
-            click.echo("Invalid session")
-
-    def list_users(self) -> None:
-        """List all users."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-
-        if not self.auth_manager:
-            raise click.ClickException("Auth system not initialized.")
-
-        users = self.auth_manager.list_users()
-        if not users:
-            click.echo("No users found.")
-            return
-
-        click.echo("Users:")
-        for user in users:
-            status = "active" if user.is_active else "inactive"
-            click.echo(f"  {user.username} ({user.email}) - {status}")
-
-    def generate_ssh_keys(self, key_size: int = 2048) -> None:
-        """Generate SSH key pair."""
-        try:
-            private_key, public_key = generate_ssh_keypair(key_size)
-            
-            # Save keys
-            ssh_dir = self.cof_dir / "ssh"
-            ssh_dir.mkdir(exist_ok=True)
-            
-            with open(ssh_dir / "id_rsa", "w") as f:
-                f.write(private_key)
-            os.chmod(ssh_dir / "id_rsa", 0o600)
-            
-            with open(ssh_dir / "id_rsa.pub", "w") as f:
-                f.write(public_key)
-            
-            click.echo(f"Generated SSH keys:")
-            click.echo(f"  Private: {ssh_dir / 'id_rsa'}")
-            click.echo(f"  Public: {ssh_dir / 'id_rsa.pub'}")
-            click.echo(f"\nPublic key:")
-            click.echo(public_key)
-
-        except Exception as e:
-            raise click.ClickException(f"Failed to generate SSH keys: {e}")
 
     def show_config(self) -> None:
         """Show repository configuration."""
@@ -868,7 +850,7 @@ class CofRepository:
             raise click.ClickException("Key must be in format 'section.key'")
 
         section, config_key = key.split(".", 1)
-        
+
         # Convert value to appropriate type
         parsed_value = value
         if value.lower() in ("true", "false"):
@@ -890,85 +872,6 @@ class CofRepository:
 
         click.echo(f"Set {key} = {parsed_value}")
 
-    # Remote operations
-    def add_remote(self, name: str, url: str) -> None:
-        """Add a remote repository."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-        
-        if not self.remote_manager:
-            raise click.ClickException("Remote manager not initialized.")
-        
-        self.remote_manager.add_remote(name, url)
-    
-    def remove_remote(self, name: str) -> None:
-        """Remove a remote repository."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-        
-        if not self.remote_manager:
-            raise click.ClickException("Remote manager not initialized.")
-        
-        self.remote_manager.remove_remote(name)
-    
-    def list_remotes(self) -> None:
-        """List all remote repositories."""
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-        
-        if not self.remote_manager:
-            raise click.ClickException("Remote manager not initialized.")
-        
-        remotes = self.remote_manager.list_remotes()
-        if not remotes:
-            click.echo("No remotes configured.")
-            return
-        
-        click.echo("Remotes:")
-        for name, remote in remotes.items():
-            click.echo(f"  {name}\t{remote.url} ({remote.host}:{remote.port})")
-    
-    async def clone_repository(self, url: str, target_dir: str, depth: Optional[int] = None,
-                               path_filter: Optional[str] = None) -> None:
-        """Clone a remote repository."""
-        from cof.remote import RemoteOperations
-
-        remote_ops = RemoteOperations(self)
-        success = await remote_ops.clone_repository(url, target_dir, depth=depth, path_filter=path_filter)
-        if not success:
-            raise click.ClickException("Failed to clone repository.")
-    
-    async def push_to_remote(self, remote_name: str, branch: str) -> None:
-        """Push to remote repository."""
-        from cof.remote import RemoteOperations
-        
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-        
-        remote_ops = RemoteOperations(self)
-        success = await remote_ops.push_to_remote(remote_name, branch)
-        if not success:
-            raise click.ClickException("Failed to push to remote.")
-    
-    async def pull_from_remote(self, remote_name: str, branch: str) -> None:
-        """Pull from remote repository."""
-        from cof.remote import RemoteOperations
-        
-        if not self._is_repo():
-            raise click.ClickException("Not a cof repository. Run 'cof init' first.")
-        
-        remote_ops = RemoteOperations(self)
-        success = await remote_ops.pull_from_remote(remote_name, branch)
-        if not success:
-            raise click.ClickException("Failed to pull from remote.")
-
-    async def start_server(self, host: str, port: int, config: Dict[str, Any]) -> None:
-        """Start the cof server."""
-        from cof.remote import RemoteOperations
-
-        remote_ops = RemoteOperations(self)
-        await remote_ops.start_server(host, port, config)
-
 
 # CLI Commands
 @click.group()
@@ -980,11 +883,12 @@ def cli(ctx, debug):
     ctx.obj["debug"] = debug
 
     log_level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        force=True
+    use_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        ColorFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", use_color)
     )
+    logging.basicConfig(level=log_level, handlers=[handler], force=True)
 
 
 @cli.command()
@@ -995,7 +899,9 @@ def init():
 
 
 @cli.command()
-@click.argument("files", nargs=-1, type=click.Path(exists=True, dir_okay=False, resolve_path=True))
+@click.argument(
+    "files", nargs=-1, type=click.Path(exists=True, dir_okay=False, resolve_path=True)
+)
 def add(files):
     """Add files to the staging area."""
     repo = CofRepository()
@@ -1080,155 +986,6 @@ def config_set(key, value):
     """Set a configuration value."""
     repo = CofRepository()
     repo.set_config(key, value)
-
-
-# Authentication commands
-@cli.group()
-def auth():
-    """Authentication commands."""
-    pass
-
-
-@auth.command()
-@click.argument("username")
-@click.argument("email")
-@click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True)
-def user_add(username, email, password):
-    """Add a new user."""
-    repo = CofRepository()
-    repo.create_user(username, email, password)
-
-
-@auth.command()
-@click.option("--username", prompt=True)
-@click.option("--password", prompt=True, hide_input=True)
-def login(username, password):
-    """Login to repository."""
-    repo = CofRepository()
-    repo.login_user(username, password)
-
-
-@auth.command()
-def logout():
-    """Logout from repository."""
-    repo = CofRepository()
-    repo.logout_user()
-
-
-@auth.command()
-def whoami():
-    """Show current user."""
-    repo = CofRepository()
-    repo.whoami()
-
-
-@auth.command()
-def users():
-    """List all users."""
-    repo = CofRepository()
-    repo.list_users()
-
-
-@auth.command()
-@click.option("--key-size", default=2048, help="SSH key size in bits")
-def ssh_generate(key_size):
-    """Generate SSH key pair."""
-    repo = CofRepository()
-    repo.generate_ssh_keys(key_size)
-
-
-# Remote commands
-@cli.group()
-def remote():
-    """Remote repository commands."""
-    pass
-
-
-@remote.command(name="add")
-@click.argument("name")
-@click.argument("url")
-def remote_add(name, url):
-    """Add a remote repository."""
-    repo = CofRepository()
-    repo.add_remote(name, url)
-
-
-@remote.command()
-@click.argument("name")
-def remove(name):
-    """Remove a remote repository."""
-    repo = CofRepository()
-    repo.remove_remote(name)
-
-
-@remote.command()
-def list():
-    """List all remote repositories."""
-    repo = CofRepository()
-    repo.list_remotes()
-
-
-@cli.command()
-@click.argument("url")
-@click.argument("target_dir", required=False)
-@click.option("--depth", type=int, default=None, help="Create a shallow clone with history truncated to the specified number of commits")
-@click.option("--filter", "path_filter", default=None, help="Filter objects by path (e.g., 'docs/*' or 'src/**/*.py')")
-def clone(url, target_dir, depth, path_filter):
-    """Clone a remote repository."""
-    import asyncio
-
-    if not target_dir:
-        # Extract repository name from URL
-        target_dir = url.split("/")[-1].replace(".git", "")
-
-    repo = CofRepository(target_dir)
-    asyncio.run(repo.clone_repository(url, target_dir, depth=depth, path_filter=path_filter))
-
-
-@cli.command()
-@click.argument("remote_name", default="origin")
-@click.option("--branch", default="main", help="Branch to push")
-def push(remote_name, branch):
-    """Push to remote repository."""
-    import asyncio
-    
-    repo = CofRepository()
-    asyncio.run(repo.push_to_remote(remote_name, branch))
-
-
-@cli.command()
-@click.argument("remote_name", default="origin")
-@click.option("--branch", default="main", help="Branch to pull")
-def pull(remote_name, branch):
-    """Pull from remote repository."""
-    import asyncio
-    
-    repo = CofRepository()
-    asyncio.run(repo.pull_from_remote(remote_name, branch))
-
-
-@cli.command()
-@click.option("--host", default="0.0.0.0", help="Host to bind the server to.")
-@click.option("--port", default=7357, help="Port to bind the server to.")
-def server(host, port):
-    """Start the Cof server."""
-    import asyncio
-
-    # Try to load config from current directory, otherwise use default
-    repo = CofRepository()
-    config = None
-    if repo._is_repo():
-        config = repo.config
-
-    default_config = {
-        "network": {
-            "packet_size": 1400,
-            "timeout_ms": 5000,
-            "max_retries": 3
-        }
-    }
-    actual_config = config if isinstance(config, dict) else default_config
-    asyncio.run(repo.start_server(host, port, actual_config))
 
 
 if __name__ == "__main__":

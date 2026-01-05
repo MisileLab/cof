@@ -13,6 +13,7 @@ import time
 
 class StorageTier(Enum):
     """Storage tier classification for blocks."""
+
     HOT = "hot"
     WARM = "warm"
     COLD = "cold"
@@ -21,11 +22,12 @@ class StorageTier(Enum):
 @dataclass
 class Block:
     """Represents a 4KB data block with deduplication metadata."""
-    hash: bytes              # BLAKE3 해시 (32바이트)
-    data: bytes              # 실제 데이터 (최대 4KB)
-    tier: StorageTier        # HOT, WARM, COLD
-    created_commit: int      # 생성된 커밋 번호
-    ref_count: int = 1       # 참조 카운트
+
+    hash: bytes  # BLAKE3 해시 (32바이트)
+    data: bytes  # 실제 데이터 (최대 4KB)
+    tier: StorageTier  # HOT, WARM, COLD
+    created_commit: int  # 생성된 커밋 번호
+    ref_count: int = 1  # 참조 카운트
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -34,7 +36,7 @@ class Block:
             "tier": self.tier.value,
             "created_commit": self.created_commit,
             "ref_count": self.ref_count,
-            "size": len(self.data)
+            "size": len(self.data),
         }
 
     @classmethod
@@ -45,20 +47,21 @@ class Block:
             data=block_data,
             tier=StorageTier(data["tier"]),
             created_commit=data["created_commit"],
-            ref_count=data["ref_count"]
+            ref_count=data["ref_count"],
         )
 
 
 @dataclass
 class Commit:
     """Represents a commit in the version control system."""
-    id: bytes               # 커밋 해시 (32바이트)
-    parent: Optional[bytes] # 부모 커밋 (옵션)
-    tree_root: bytes        # 루트 트리 객체 (32바이트)
-    timestamp: int          # Unix 타임스탬프
-    author: str             # 작성자 정보
-    message: str            # 커밋 메시지
-    sequence: int           # 순차 번호 (aging용)
+
+    id: bytes  # 커밋 해시 (32바이트)
+    parent: Optional[bytes]  # 부모 커밋 (옵션)
+    tree_root: bytes  # 루트 트리 객체 (32바이트)
+    timestamp: int  # Unix 타임스탬프
+    author: str  # 작성자 정보
+    message: str  # 커밋 메시지
+    sequence: int  # 순차 번호 (aging용)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -69,7 +72,7 @@ class Commit:
             "timestamp": self.timestamp,
             "author": self.author,
             "message": self.message,
-            "sequence": self.sequence
+            "sequence": self.sequence,
         }
 
     @classmethod
@@ -82,17 +85,18 @@ class Commit:
             timestamp=data["timestamp"],
             author=data["author"],
             message=data["message"],
-            sequence=data["sequence"]
+            sequence=data["sequence"],
         )
 
 
 @dataclass
 class TreeEntry:
     """Represents an entry in a tree object (file or directory)."""
-    name: str               # 파일/디렉토리 이름
-    mode: int               # 권한
-    hash: bytes             # 블롭/서브트리 해시 (32바이트)
-    size: int               # 원본 파일 크기
+
+    name: str  # 파일/디렉토리 이름
+    mode: int  # 권한
+    hash: bytes  # 블롭/서브트리 해시 (32바이트)
+    size: int  # 원본 파일 크기
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -100,7 +104,7 @@ class TreeEntry:
             "name": self.name,
             "mode": self.mode,
             "hash": self.hash.hex(),
-            "size": self.size
+            "size": self.size,
         }
 
     @classmethod
@@ -110,13 +114,14 @@ class TreeEntry:
             name=data["name"],
             mode=data["mode"],
             hash=bytes.fromhex(data["hash"]),
-            size=data["size"]
+            size=data["size"],
         )
 
 
 @dataclass
 class Tree:
     """Represents a tree object containing file and directory entries."""
+
     entries: Dict[str, TreeEntry] = field(default_factory=dict)
 
     def add_entry(self, entry: TreeEntry) -> None:
@@ -146,6 +151,7 @@ class Tree:
 @dataclass
 class StagedFile:
     """Represents a file in the staging area."""
+
     path: str
     block_hashes: List[str]
     size: int
@@ -159,7 +165,7 @@ class StagedFile:
             "block_hashes": self.block_hashes,
             "size": self.size,
             "mode": self.mode,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp,
         }
 
     @classmethod
@@ -170,13 +176,14 @@ class StagedFile:
             block_hashes=data["block_hashes"],
             size=data["size"],
             mode=data["mode"],
-            timestamp=data.get("timestamp", int(time.time()))
+            timestamp=data.get("timestamp", int(time.time())),
         )
 
 
 @dataclass
 class BlockMap:
     """Maps block hashes to their storage locations and metadata."""
+
     hash_to_location: Dict[str, str] = field(default_factory=dict)
     hash_to_commit: Dict[str, int] = field(default_factory=dict)
     hash_to_refcount: Dict[str, int] = field(default_factory=dict)
@@ -212,7 +219,7 @@ class BlockMap:
         return {
             "hash_to_location": self.hash_to_location,
             "hash_to_commit": self.hash_to_commit,
-            "hash_to_refcount": self.hash_to_refcount
+            "hash_to_refcount": self.hash_to_refcount,
         }
 
     @classmethod
@@ -223,68 +230,3 @@ class BlockMap:
         block_map.hash_to_commit = data.get("hash_to_commit", {})
         block_map.hash_to_refcount = data.get("hash_to_refcount", {})
         return block_map
-
-
-@dataclass
-class RemoteRepository:
-    """Remote repository configuration."""
-    name: str
-    url: str
-    host: str
-    port: int
-    repo_path: str = "/"
-    protocol: str = "udp"
-    
-    @classmethod
-    def from_url(cls, name: str, url: str) -> "RemoteRepository":
-        """Create remote from URL."""
-        if url.startswith("cof://"):
-            url = url[6:]
-        elif not url.startswith("udp://"):
-            url = f"udp://{url}"
-        
-        if url.startswith("udp://"):
-            url = url[6:]
-        
-        repo_path = "/"
-        if "/" in url:
-            host_port, repo_path = url.split("/", 1)
-        else:
-            host_port = url
-
-        if ":" in host_port:
-            host, port_str = host_port.rsplit(":", 1)
-            try:
-                port = int(port_str)
-            except ValueError:
-                host = host_port
-                port = 7357  # Default cof port
-        else:
-            host = host_port
-            port = 7357
-        
-        return cls(
-            name=name,
-            url=f"cof://{host}:{port}/{repo_path}",
-            host=host,
-            port=port,
-            repo_path=repo_path,
-            protocol="udp"
-        )
-
-
-class RepositoryInterface:
-    """Minimal interface for repository operations used by remote module."""
-    
-    def __init__(self, path: str):
-        self.path = path
-        self.cof_dir = None
-        self.config = None
-    
-    def init(self):
-        """Initialize repository - to be implemented by concrete class."""
-        pass
-    
-    def _restore_working_tree(self):
-        """Restore working tree - to be implemented by concrete class."""
-        pass
